@@ -1,0 +1,460 @@
+Portfolio5
+================
+Holland Sun
+
+In one of my neuroscience courses in undergraduate, I learned the graph
+theory. It’s about how neurons, brain regions connected using nodes and
+edges. One interesting argument is this area is “six degrees of
+separation”: the idea that any two people in the world are connected by
+at most six intermediate acquaintances. This was proposed by Milgram in
+1967 and has been tested in various social networks since then. Facebook
+actually ran their own version in 2016 and found the average distance
+was about 3.57 hops.
+
+I remember visiting several websites related to this, such as ones that
+traced how actors from different countries were connected through
+various works, or explored links between Einstein and some emperor in
+Chinese history. Unfortunately, I can’t seem to find those anymore. But
+the website below might be interesting
+
+[Six-Degree-Wikipedia](https://www.sixdegreesofwikipedia.com/)
+
+[Six Degrees of Francis
+Bacon](http://www.sixdegreesoffrancisbacon.com/?ids=10000473&min_confidence=60&type=network)
+
+## Portfolio Goals
+
+- Load and explore real social network datasets from the Stanford SNAP
+  collection
+- Understand the difference between undirected and directed graphs
+- Randomly sample node pairs and compute shortest path lengths (BFS)
+- Visualize the distribution of path lengths and test whether “six
+  degrees” holds
+- Practice network analysis with `igraph` in R
+
+## Intro
+
+The “six degrees of separation” hypothesis says that any two people in a
+social network are connected by typically around 6 chain. To test this,
+we need real network data. The [Stanford SNAP
+collection](https://snap.stanford.edu/data/) provides many large-scale
+network datasets. For this portfolio, I picked **Facebook ego-network**
+which has 4,039 nodes, 88,234 edges.
+
+``` r
+library(tidyverse)
+library(igraph)
+```
+
+## Part 1: Load and explore
+
+### 1a: Node Files
+
+When you download and unzip `facebook.tar.gz` from SNAP, and unzip it,
+you will see lots of files name by node name (node 0, 107, 348, etc.)
+has a set of files associated with them: ![](pic/folder_screenshot.png)
+
+#### If I remember correctly, these files represent：
+
+- **`0.edges`** — The edge list for the ego network of node 0. Each line
+  contains two node IDs, representing a friendship between those two
+  people.
+- **`0.circles`** — The “friend circles” (like Facebook friend lists)
+  for node 0. Each line is a circle name followed by the node IDs
+  belonging to that circle.
+- **`0.feat`** — Feature vectors for each node in the ego network. Each
+  row is a node ID followed by binary features (1 = user has this
+  profile attribute, 0 = does not).
+- **`0.egofeat`** — The feature vector for the ego user (node 0) itself.
+- **`0.featnames`** — Names/descriptions for each feature dimension.
+
+Let’s take a quick look at a few of them.
+
+``` r
+# edge file for ego-user 0
+ego0_edges <- read.table("data/facebook/0.edges", col.names = c("from", "to"))
+head(ego0_edges)
+```
+
+    ##   from  to
+    ## 1  236 186
+    ## 2  122 285
+    ## 3   24 346
+    ## 4  271 304
+    ## 5  176   9
+    ## 6  130 329
+
+``` r
+# circles file
+ego0_circles <- readLines("data/facebook/0.circles")
+head(ego0_circles)
+```
+
+    ## [1] "circle0\t71\t215\t54\t61\t298\t229\t81\t253\t193\t97\t264\t29\t132\t110\t163\t259\t183\t334\t245\t222"
+    ## [2] "circle1\t173"                                                                                         
+    ## [3] "circle2\t155\t99\t327\t140\t116\t147\t144\t150\t270"                                                  
+    ## [4] "circle3\t51\t83\t237"                                                                                 
+    ## [5] "circle4\t125\t344\t295\t257\t55\t122\t223\t59\t268\t280\t84\t156\t258\t236\t250\t239\t69"             
+    ## [6] "circle5\t23"
+
+If you’re interested, you can explore other files. In my understanding,
+this file is more from the perspective of individual nodes. only when
+you’ve identified a particular node as important and want to analyze it
+specifically. For example, if we discover a specific brain region (PFC),
+we might want to examine what role it plays within this network.
+However, in our case, the combine network files may be more useful.
+
+### 1a: Combined Files
+
+For us, this overall combined network data is somewhat more useful.
+Let’s first take a look at what they are:
+
+``` r
+fb_edges <- read.table("data/facebook_combined.txt", header = FALSE, 
+                       comment.char = "#", col.names = c("from", "to"))
+head(fb_edges)
+```
+
+    ##   from to
+    ## 1    0  1
+    ## 2    0  2
+    ## 3    0  3
+    ## 4    0  4
+    ## 5    0  5
+    ## 6    0  6
+
+Each line in the fb_edges reprenst an edge between to nodes, and Here we
+gave `88234` edges in datasets.
+
+``` r
+# Build an undirected graph
+fb_graph <- graph_from_data_frame(fb_edges, directed = FALSE)
+# Remove any duplicate edges or self-loops
+fb_graph <- simplify(fb_graph)
+```
+
+Here, I use **igraph** package to create an undirected network graph
+from the fb_edges we got above. First, graphfromdataframe() generates
+the graph structure based on connections between nodes, and then
+simplify() removes duplicate connections and self-loops, transforming
+the network into a simple graph.
+
+In addition, **igraph** provides several useful functions for
+calculating network metrics:
+
+`vcount()` counts the number of nodes in the network. `ecount()` counts
+the number of edges in the network. `diameter()` calculates the longest
+shortest path between any two nodes in the network. `mean_distance()`
+computes the average shortest path length across all node pairs.
+
+``` r
+vcount(fb_graph)
+```
+
+    ## [1] 4039
+
+``` r
+ecount(fb_graph)
+```
+
+    ## [1] 88234
+
+``` r
+diameter(fb_graph)
+```
+
+    ## [1] 8
+
+``` r
+mean_distance(fb_graph)
+```
+
+    ## [1] 3.692507
+
+Here an interest finding is that the average shortest path length across
+all node pairs is `3.6925068`, This is less than 6, so our guess might
+be correct, but why not add some visualization to make the results look
+better?
+
+## Part 2: Visualizing the Network
+
+### 2a: Full network visualization
+
+Although plotting all 4,039 nodes at once is messy, just like many
+papers first provide some very fancy plot without any useful
+information, I will do the same thing:
+
+``` r
+# Compute a layout (this takes a moment for ~4000 nodes)
+set.seed(42)
+# OK 42 is back!!!!!
+layout_fb <- layout_with_fr(fb_graph)
+# Color by community detection
+communities <- cluster_louvain(fb_graph)
+membership <- membership(communities)
+
+n_comm <- max(membership)
+comm_colors <- rainbow(n_comm, alpha = 0.6)
+
+plot(fb_graph,
+     vertex.size = 1.5,
+     vertex.label = NA,
+     vertex.color = comm_colors[membership],
+     edge.color = rgb(0.5, 0.5, 0.5, 0.1),
+     edge.width = 0.3,
+     layout = layout_fb)
+```
+
+![](portfolio5_files/figure-gfm/full-network-1.png)<!-- --> You can see
+distinct clusters, those are the different ego-networks and social
+groups. Also the friend circles here and the bridges between them.
+
+### 2b: Single ego-network visualization
+
+Although it might be off-topic, since we already have node-level data
+(as showed in 1a). Why not try a node-level analysis as well?
+
+Fortunately, we don’t need to consider those network feature files, only
+need the edges data (here we use node0_edges). Of course, you might also
+filter out nodes with value 0 from combined and proceed accordingly (I’m
+guessing).
+
+``` r
+# Build ego-network for node 0 
+ego0_graph <- graph_from_data_frame(ego0_edges, directed = FALSE)
+# Add the ego node and connect it to everyone
+all_nodes_in_ego <- unique(c(ego0_edges$from, ego0_edges$to))
+ego_edges_df <- data.frame(from = rep("0", length(all_nodes_in_ego)),
+                           to = as.character(all_nodes_in_ego))
+ego0_full <- graph_from_data_frame(rbind(
+  data.frame(from = as.character(ego0_edges$from), 
+             to = as.character(ego0_edges$to)),
+  ego_edges_df
+), directed = FALSE)
+ego0_full <- simplify(ego0_full)
+
+# Color the ego node differently
+v_colors <- rep("steelblue", vcount(ego0_full))
+v_colors[V(ego0_full)$name == "0"] <- "#abddff"
+v_sizes <- rep(3, vcount(ego0_full))
+v_sizes[V(ego0_full)$name == "0"] <- 8
+
+set.seed(42)
+plot(ego0_full,
+     vertex.size = v_sizes,
+     vertex.label = NA,
+     vertex.color = v_colors,
+     edge.color = rgb(0.5, 0.5, 0.5, 0.15),
+     edge.width = 0.5,
+     layout = layout_with_fr(ego0_full))
+```
+
+![](portfolio5_files/figure-gfm/ego-viz-1.png)<!-- -->
+
+The lightblue node is the ego (person 0), and you can see how their
+social network naturally clusters into distinct groups(school friends,
+work colleagues, family, etc).
+
+### 2c: Degree distribution
+
+Another interesting thing is the **degree**, but the **degree** here is
+different from the degree in six degrees of separation. **Degree** in
+graph theory often refers to the number of edges directly connected to a
+node. In this case, it is the number of mutual Facebook followers you
+have.
+
+``` r
+fb_degrees <- degree(fb_graph)
+
+ggplot(tibble(degree = fb_degrees), aes(x = degree)) +
+  geom_histogram(binwidth = 5, fill = "steelblue", color = "white", alpha = 0.8) +
+  geom_vline(xintercept = mean(fb_degrees), linetype = "dashed", color = "#5066a1") +
+  annotate("text", x = mean(fb_degrees) + 5, y = Inf, vjust = 2,
+           label = paste0("Mean = ", round(mean(fb_degrees), 1)), 
+           color = "#5066a1", size = 3.5) +
+  labs(title = "Degree Distribution (Number of Friends per Person)",
+       x = "Degree", y = "Count") +
+  theme_minimal()
+```
+
+![](portfolio5_files/figure-gfm/degree-dist-1.png)<!-- -->
+
+We can see that most people have a moderate number of friends, but a few
+“central” nodes are connected to an extremely large number of people. In
+our case, these central nodes act as bridges between different
+communities, which is one of the reasons why short paths exist in social
+networks. Of course, the explanations of these central nodes are
+slightly different in different fields, but from the perspective of
+information exchange, they are indeed what keep a network operating
+efficiently.
+
+## Part 4: The Six Degrees Experiment
+
+Now it’s time to get back to our main quest. Since we already have the
+full network loaded, we technically already know the answer
+`mean_distance(fb_graph)`（in 1b）we have computed the average shortest
+path across the entire graph.
+
+Well, the idea here is for our dataset with 4,039 nodes, when trying to
+compute all pairwise shortest paths, the computer will checking
+n×(n-1)/2 ≈ **8.15 million pairs**. That’s not so large. But in
+real-world applications. for instance, text-based semantic networks, or
+cross-subject voxel-level brain connectivity analysis in fMRI (That is a
+painful lesson related to my previous project and why I understand this
+method here ) the node counts will be unbelievable large. If you tried
+this on Facebook’s full 1.6 billion user network, you’d be looking at
+~10^18 pairs, which is ……
+
+So here I ask a favor from Claude. It told me that in practice, the
+standard approach for large-scale network analysis is **sampling**:
+randomly select a subset of node pairs, compute the shortest path for
+each, and use the resulting distribution to estimate the
+population-level statistics. As for **igraph**, in unweighted networks,
+we can us `igraph::distances()` to calculate the shortest distanct of
+two node. The default algorithm used by `igraph::distances()` for
+computing shortest paths is Breadth-First Search
+[(BFS)](https://en.wikipedia.org/wiki/Breadth-first_search). So here we
+first perform sampling and then use this function to calculate the
+shortest distance.
+
+``` r
+set.seed(42)
+n_samples <- 10000
+
+node_ids <- V(fb_graph)$name
+pairs <- tibble(
+  node_a = sample(node_ids, n_samples, replace = TRUE),
+  node_b = sample(node_ids, n_samples, replace = TRUE)
+) %>%
+  filter(node_a != node_b)
+
+# Compute shortest path for each pair
+pairs$path_length <- map2_dbl(pairs$node_a, pairs$node_b, function(a, b) {
+  d <- distances(fb_graph, v = a, to = b)
+  as.numeric(d[1, 1])
+})
+
+pairs <- pairs %>% filter(is.finite(path_length))
+```
+
+### 4a: Distribution of shortest paths
+
+create a distribution chart:
+
+``` r
+ggplot(pairs, aes(x = path_length)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "white", alpha = 0.8) +
+  geom_vline(xintercept = 6, linetype = "dashed", color = "#5066a1", linewidth = 0.8) +
+  geom_vline(xintercept = mean(pairs$path_length), linetype = "solid",
+             color = "orange", linewidth = 0.8) +
+  annotate("text", x = 6.3, y = Inf, label = "6 degrees", color = "#5066a1",
+           vjust = 2, hjust = 0, size = 3.5) +
+  annotate("text", x = mean(pairs$path_length) + 0.3, y = Inf,
+           label = paste0("Mean = ", round(mean(pairs$path_length), 2)),
+           color = "orange", vjust = 3.5, hjust = 0, size = 3.5) +
+  scale_x_continuous(breaks = 1:10) +
+  labs(title = "Distribution of Shortest Path Lengths (1000 Random Pairs)",
+       subtitle = "Red dashed = 6 degrees | Orange = mean",
+       x = "Shortest Path Length (number of hops)", y = "Count") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+![](portfolio5_files/figure-gfm/path-hist-1.png)<!-- -->
+
+From the perspective of distribution, the six degrees of separation
+theory does seem to be supported, so the claim is reasonable in our
+data.
+
+But before I finish, I have another great idea (one more fancy graph)
+
+### 4b: Visualizing all paths
+
+To draw an intuitive and useless but beautiful plot showing the shortest
+path. First we need pick two specific nodes: **2001** and **531** (my
+birth year and birthday) and find all simple paths between them. Then we
+highlight the shortest one:
+
+``` r
+node_from <- "2001"
+node_to <- "531"
+
+# First, find the shortest path length
+sp <- shortest_paths(fb_graph, from = node_from, to = node_to)$vpath[[1]]
+sp_length <- length(sp) - 1
+sp_nodes <- names(sp)
+
+
+
+# Find all simple paths up to a reasonable cutoff (shortest + 2), the same reason with above, The computational load in network analysis may far exceed your expectations.
+
+all_paths <- all_simple_paths(fb_graph, 
+                              from = node_from, 
+                              to = node_to, 
+                              cutoff = sp_length + 2)
+
+# all nodes and edges 
+all_path_nodes <- unique(unlist(lapply(all_paths, names)))
+sub_graph <- induced_subgraph(fb_graph, all_path_nodes)
+
+# Identify edge
+sp_edge_pairs <- data.frame(
+  from = sp_nodes[-length(sp_nodes)],
+  to = sp_nodes[-1],
+  stringsAsFactors = FALSE)
+
+# Color edges: red for shortest path, gray for other paths
+edge_list <- as_edgelist(sub_graph)
+edge_colors <- rep(rgb(0.6, 0.6, 0.6, 0.3), nrow(edge_list))
+edge_widths <- rep(0.5, nrow(edge_list))
+
+for (i in 1:nrow(edge_list)) {
+  e1 <- edge_list[i, 1]; e2 <- edge_list[i, 2]
+  is_sp <- any((sp_edge_pairs$from == e1 & sp_edge_pairs$to == e2) |
+               (sp_edge_pairs$from == e2 & sp_edge_pairs$to == e1))
+  if (is_sp) {
+    edge_colors[i] <- "red"
+    edge_widths[i] <- 3
+  }
+}
+
+# Color nodes
+v_colors <- rep("lightgray", vcount(sub_graph))
+v_sizes <- rep(3, vcount(sub_graph))
+v_label <- rep(NA, vcount(sub_graph))
+
+# Nodes on shortest path
+for (j in seq_along(V(sub_graph)$name)) {
+  nm <- V(sub_graph)$name[j]
+  if (nm == node_from) {
+    v_colors[j] <- "#D35400" 
+    v_sizes[j] <- 6
+  } else if (nm == node_to) {
+    v_colors[j] <- "#D35400"  
+    v_sizes[j] <- 6
+  } else if (nm %in% sp_nodes) {
+    v_colors[j] <- "red"
+    v_sizes[j] <- 6
+    v_label[j] <- nm
+  }
+}
+
+set.seed(42)
+plot(sub_graph,
+     vertex.size = v_sizes,
+     vertex.color = v_colors,
+     vertex.label = v_label,
+     vertex.label.cex = 0.65,
+     vertex.label.color = "black",
+     vertex.frame.color = NA,
+     edge.color = edge_colors,
+     edge.width = edge_widths,
+     layout = layout_with_fr(sub_graph),
+     main = paste0("All Paths Between Node 2001 and Node 531\n"))
+```
+
+![](portfolio5_files/figure-gfm/all-paths-1.png)<!-- -->
+
+Again, Thanks to my aesthetic consultant, Claude. You can’t imagine how
+terrible these images originally would be without those complex
+parameter adjustments.

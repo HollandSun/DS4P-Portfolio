@@ -1,0 +1,434 @@
+Visualizing Brain Regions from Literature
+================
+Holland Sun
+
+I know there are some websites that can visualize which brain region is
+related to certain cognitive function. Like
+[neurosynth](https://neurosynth.org) by searching for “attention,” we
+can see the distribution of brain regions associated with it, and even
+some effect sizes (as this website is actually design for
+meta-analyses). But here, I’d like to do something a bit more
+interesting (Of course more simple) specifically foucus on attention
+flexibility. It’s not rigorous science, but it’s a fun exercise in text
+mining and visualization.
+
+## Portfolio Goals
+
+- Learn how to import literature data (exported from PubMed) into R
+- Learn text mining and extract brain region names from abstracts
+- Use the `ggseg` package to visualization
+
+## Intro
+
+Neuroimaging studies often report which brain regions are activated
+during specific cognitive tasks. If you read enough papers on
+“attentional flexibility,” you’ll notice certain regions popping up
+again and again: prefrontal cortex, anterior cingulate, parietal areas,
+etc. But what if we wanted to quantify that impression?
+
+A proper approach would be a coordinate-based meta-analysis (like ALE or
+MKDA), where you extract MNI/Talairach coordinates from each study and
+compute statistical convergence maps. But as I mention before such tools
+are serious for research. So what I am doing here is much lazier : we’re
+just counting how many times each brain region name appears across
+abstracts.
+
+## Part 1: Geting data
+
+### Search literature
+
+Before we write any R code, we need data. If we just search “attentional
+flexibility,” we’ll get a mix of behavioral studies, clinical studies,
+and neuroimaging studies. We want to focus on human neuroimaging, so a
+reasonable PubMed query would be something like:
+
+**(“attentional flexibility” OR “attentional shifting” OR “attentional
+set shifting” OR “attention switching” OR “task switching”) AND (fMRI OR
+neuroimaging OR “brain activation” OR PET)**
+
+In practice, I went to PubMed and exported the results. PubMed’s CSV
+export gives you columns like PMID, Title, Authors, Abstract, etc.
+
+For reproducibility, I saved both files in the `data/` folder:
+
+- `pubmed_metadata.csv` — the CSV export (for clean metadata)
+- `pubmed_abstracts.txt` — the PubMed format export (for abstracts)
+
+``` r
+library(tidyverse)
+library(stringr)
+```
+
+## Part 2: Text mining
+
+The CSV file has clean metadata:
+
+``` r
+metadata <- read_csv("data/pubmed_metadata.csv")
+glimpse(metadata)
+```
+
+    ## Rows: 652
+    ## Columns: 11
+    ## $ PMID               <dbl> 27491478, 39989611, 36807013, 17412678, 36226894, 3…
+    ## $ Title              <chr> "Cognitive inflexibility in Obsessive-Compulsive Di…
+    ## $ Authors            <chr> "Gruner P, Pittenger C.", "Shatalina E, Onwordi EC,…
+    ## $ Citation           <chr> "Neuroscience. 2017 Mar 14;345:243-255. doi: 10.101…
+    ## $ `First Author`     <chr> "Gruner P", "Shatalina E", "Schwarze SA", "Robbins …
+    ## $ `Journal/Book`     <chr> "Neuroscience", "Imaging Neurosci (Camb)", "Dev Cog…
+    ## $ `Publication Year` <dbl> 2017, 2024, 2023, 2007, 2023, 2022, 2021, 2003, 201…
+    ## $ `Create Date`      <date> 2016-08-06, 2025-02-24, 2023-02-22, 2007-04-07, 20…
+    ## $ PMCID              <chr> "PMC5288350", "PMC11840333", "PMC9969289", "PMC2430…
+    ## $ `NIHMS ID`         <chr> "NIHMS807301", NA, NA, NA, NA, "NIHMS1811920", NA, …
+    ## $ DOI                <chr> "10.1016/j.neuroscience.2016.07.030", "10.1162/imag…
+
+``` r
+cat("Columns:", paste(names(metadata), collapse = ", "))
+```
+
+    ## Columns: PMID, Title, Authors, Citation, First Author, Journal/Book, Publication Year, Create Date, PMCID, NIHMS ID, DOI
+
+For the basic information They looks all good (although we won’t use
+them in our following analysis).
+
+Now For the most tricky part. The PubMed text file looks something like
+this:
+
+    1. Neuroscience. 2017 Mar 14;345:243-255...
+
+    Cognitive inflexibility in Obsessive-Compulsive Disorder.
+
+    Gruner P(1), Pittenger C(2).
+
+    Author information:
+    ...
+
+    Obsessive-Compulsive Disorder (OCD) is characterized by maladaptive patterns of
+    repetitive, inflexible cognition and behavior...
+
+    DOI: 10.1016/j.neuroscience.2016.07.030
+    PMCID: PMC5288350
+    PMID: 27491478 [Indexed for MEDLINE]
+
+Each entry ends with a `PMID:` line, and entries are separated by blank
+lines. The abstract is the longest continuous paragraph in each entry
+and it comes after the author info and before the copyright/DOI lines.
+So My strategy here is spliting the file into individual entries, then
+extract the PMID and the abstract from each.
+
+``` r
+raw_text <- readLines("data/pubmed_abstracts.txt", warn = FALSE)
+full_text <- paste(raw_text, collapse = "\n")
+
+# Split into individual entries — each starts with a number like "1. " or "2. "
+entries <- str_split(full_text, "(?=\n\\d+\\. )")[[1]]
+entries <- entries[nchar(trimws(entries)) > 0]
+
+cat("Number of entries found:", length(entries), "\n")
+```
+
+    ## Number of entries found: 653
+
+Now I need to extract the PMID and abstract from each entry. This
+requires some regex (happy to know this term in English, in Chinese it
+has a very weird name). The abstract is typically the longest block of
+text between the author information section and the copyright/DOI
+section.
+
+``` r
+extract_pubmed_entry <- function(entry) {
+  # Extract PMID 
+  pmid_match <- str_extract(entry, "PMID:\\s*(\\d+)")
+  pmid <- str_extract(pmid_match, "\\d+")
+  
+  lines <- str_split(entry, "\n")[[1]]
+  lines <- trimws(lines)
+  
+  # The structure of each PubMed entry is:
+  #   1. Citation info (journal, year, doi...)
+  #   [blank line]
+  #   2. Title
+  #   [blank line]
+  #   3. Author names
+  #   [blank line]
+  #   4. Author information
+  #   [blank line]        
+  #   5. Abstract text
+  #   [blank line]
+  #   6. Copyright / DOI / PMID
+  
+  abstract_lines <- c()
+  in_abstract <- FALSE
+  in_author_info <- FALSE
+  has_author_info <- any(str_detect(lines, "^Author information:"))
+  
+  # Find where author names are (line with parenthetical affiliations like "Smith J(1)")
+  author_line_idx <- 0
+  
+  for (i in seq_along(lines)) {
+    line <- lines[i]
+    
+    # -- Phase 1: detect "Author information:" section
+    if (str_detect(line, "^Author information:")) {
+      in_author_info <- TRUE
+      next
+    }
+    
+    # -- Phase 2: skip all affiliation lines until blank line
+    if (in_author_info && !in_abstract) {
+      if (line == "") {
+        # blank line after affiliations = abstract starts next
+        in_author_info <- FALSE
+        in_abstract <- TRUE
+        next
+      }
+      # still in affiliations, skip
+      next
+    }
+    
+    # -- For entries WITHOUT Author information:
+    # The abstract follows the author names after a blank line.
+    # Author names typically contain parenthetical numbers like "(1)"
+    if (!has_author_info && !in_abstract) {
+      if (str_detect(line, "\\(\\d+\\)") && i > 2) {
+        author_line_idx <- i
+      }
+      # After the author name block, look for blank line then abstract
+      if (author_line_idx > 0 && line == "" && i > author_line_idx) {
+        in_abstract <- TRUE
+        next
+      }
+      next
+    }
+    
+    # -- Phase 3: collect abstract lines
+    if (in_abstract) {
+      # Stop at DOI, copyright, PMID, or empty-then-metadata
+      if (str_detect(line, "^(DOI:|PMCID:|PMID:|©|Copyright|Published by|Conflict of interest)")) break
+      if (line == "") {
+        # A blank line inside abstract could be end of abstract.
+        # Check if next non-blank line is metadata
+        remaining <- lines[(i+1):min(i+3, length(lines))]
+        remaining <- remaining[remaining != ""]
+        if (length(remaining) > 0 && 
+            str_detect(remaining[1], "^(DOI:|PMCID:|PMID:|©|Copyright|Published by|Conflict of interest)")) {
+          break
+        }
+        # otherwise it might be a paragraph break within abstract, keep going
+      }
+      if (line != "") {
+        abstract_lines <- c(abstract_lines, line)
+      }
+    }
+  }
+  
+  abstract <- paste(abstract_lines, collapse = " ")
+  abstract <- str_squish(abstract)
+  
+  tibble(PMID = as.integer(pmid), Abstract = abstract)
+}
+```
+
+To be honest, this part is not perfect. PubMed’s text format is…
+inconsistent. When I first use the simple strategy I only get around 50
+abstract. Becasue Some entries have author information blocks, some
+don’t. Some have copyright notices, some don’t. It is a bit messy. So I
+turn to ChatGpt to help me find the reason, Although he still know
+nothing, I check some possibility and let him help me on those `if`
+condition code. It’s too messy
+
+<span style="color: deepskyblue;">*I then find there is a R package
+called `rentrez`, which can directly pull abstracts from the NCBI API
+using PMIDs. But I am satisfied with just using text here)*</span>
+
+``` r
+abstracts_list <- map(entries, possibly(extract_pubmed_entry, 
+                                         tibble(PMID = NA_integer_, Abstract = "")))
+abstracts_df <- bind_rows(abstracts_list)
+abstracts_df <- abstracts_df %>% filter(!is.na(PMID))
+papers <- metadata %>%
+  inner_join(abstracts_df, by = "PMID")
+
+papers %>%
+  select(PMID, Abstract) %>%
+  slice(1:5)
+```
+
+    ## # A tibble: 5 × 2
+    ##       PMID Abstract                                                             
+    ##      <dbl> <chr>                                                                
+    ## 1 27491478 Obsessive-Compulsive Disorder (OCD) is characterized by maladaptive …
+    ## 2 39989611 Synaptic terminal density is thought to influence cognitive function…
+    ## 3 36807013 The ability to flexibly switch between tasks is key for goal-directe…
+    ## 4 17412678 The neuropsychological basis of attentional set-shifting, task-set s…
+    ## 5 36226894 The control of emotions is of potentially great clinical relevance. …
+
+We now have a tidy dataframe with metadata AND abstracts.
+
+## Part 3: Counting
+
+So since we decide just count the frequency of those regions, we need a
+\*\*dictionary\* to search for in the abstracts. This is where it gets a
+bit tricky, because brain regions have many aliases. “dlPFC” and
+“dorsolateral prefrontal cortex” refer to the same area. And some region
+names are substrings of others (“frontal cortex” is inside “prefrontal
+cortex”). So we need to be somewhat careful with our dictionary.
+
+I’ll create a dictionary that maps various text patterns to standardized
+region names. And I’ll also map them to the `ggseg` atlas region labels
+
+``` r
+brain_dict <- tribble(
+  ~pattern,                            ~region_standard,                    ~ggseg_label,
+  "dorsolateral prefrontal",           "Dorsolateral PFC",                  "rostralmiddlefrontal",
+  "dlPFC",                             "Dorsolateral PFC",                  "rostralmiddlefrontal",
+  "DLPFC",                             "Dorsolateral PFC",                  "rostralmiddlefrontal",
+  "middle frontal gyrus",              "Middle Frontal Gyrus",              "caudalmiddlefrontal",
+  "inferior frontal gyrus",            "Inferior Frontal Gyrus",            "parsopercularis",
+  "inferior frontal cortex",           "Inferior Frontal Gyrus",            "parsopercularis",
+  "right inferior frontal",            "Inferior Frontal Gyrus",            "parsopercularis",
+  "inferior frontal junction",         "Inferior Frontal Junction",         "parsopercularis",
+  "ventrolateral prefrontal",          "Ventrolateral PFC",                 "parstriangularis",
+  "vlPFC",                             "Ventrolateral PFC",                 "parstriangularis",
+  "VLPFC",                             "Ventrolateral PFC",                 "parstriangularis",
+  "superior frontal gyrus",            "Superior Frontal Gyrus",            "superiorfrontal",
+  "superior frontal cortex",           "Superior Frontal Gyrus",            "superiorfrontal",
+  "medial prefrontal",                 "Medial PFC",                        "medialorbitofrontal",
+  "medial frontal cortex",             "Medial Frontal",                    "medialorbitofrontal",
+  "orbitofrontal cortex",              "Orbitofrontal Cortex",              "lateralorbitofrontal",
+  "orbitofrontal",                     "Orbitofrontal Cortex",              "lateralorbitofrontal",
+  "anterior cingulate",                "Anterior Cingulate",                "rostralanteriorcingulate",
+  "ACC",                               "Anterior Cingulate",                "rostralanteriorcingulate",
+  "posterior cingulate",               "Posterior Cingulate",               "posteriorcingulate",
+  "cingulate cortex",                  "Cingulate Cortex",                  "caudalanteriorcingulate",
+  "cingulate gyrus",                   "Cingulate Cortex",                  "caudalanteriorcingulate",
+  "superior parietal",                 "Superior Parietal Lobule",          "superiorparietal",
+  "intraparietal sulcus",              "Intraparietal Sulcus",              "superiorparietal",
+  "inferior parietal",                 "Inferior Parietal Lobule",          "inferiorparietal",
+  "angular gyrus",                     "Angular Gyrus",                     "inferiorparietal",
+  "supramarginal gyrus",               "Supramarginal Gyrus",              "supramarginal",
+  "temporoparietal junction",          "Temporoparietal Junction",          "supramarginal",
+  "precuneus",                         "Precuneus",                         "precuneus",
+  "insula",                            "Insula",                            "insula",
+  "anterior insula",                   "Insula",                            "insula",
+  "frontal eye field",                 "Frontal Eye Fields",                "precentral",
+  "precentral gyrus",                  "Precentral Gyrus",                  "precentral",
+  "precentral sulcus",                 "Precentral Gyrus",                  "precentral",
+  "premotor cortex",                   "Premotor Cortex",                   "precentral",
+  "supplementary motor",               "SMA / Pre-SMA",                     "paracentral",
+  "pre-supplementary motor",           "SMA / Pre-SMA",                     "paracentral",
+  "pre-SMA",                           "SMA / Pre-SMA",                     "paracentral",
+  "fusiform gyrus",                    "Fusiform Gyrus",                    "fusiform",
+  "fusiform",                          "Fusiform Gyrus",                    "fusiform",
+  "lateral occipital",                 "Lateral Occipital",                 "lateraloccipital",
+  "visual cortex",                     "Visual Cortex",                     "lateraloccipital",
+  "occipital cortex",                  "Occipital Cortex",                  "lateraloccipital",
+  "posterior parietal cortex",         "Posterior Parietal",                "superiorparietal",
+  "posterior parietal",                "Posterior Parietal",                "superiorparietal",
+  "temporal cortex",                   "Temporal Cortex",                   "middletemporal",
+  "middle temporal gyrus",             "Middle Temporal Gyrus",             "middletemporal",
+  "superior temporal gyrus",           "Superior Temporal Gyrus",           "superiortemporal",
+  "superior temporal sulcus",          "Superior Temporal Gyrus",           "superiortemporal",
+  "inferior temporal",                 "Inferior Temporal Gyrus",           "inferiortemporal",
+  "postcentral gyrus",                 "Postcentral Gyrus",                "postcentral",
+  "somatosensory",                     "Postcentral Gyrus",                "postcentral",
+  "cuneus",                            "Cuneus",                            "cuneus",
+  "lingual gyrus",                     "Lingual Gyrus",                     "lingual",
+  "entorhinal",                        "Entorhinal Cortex",                "entorhinal",
+  "parahippocampal",                   "Parahippocampal Gyrus",            "parahippocampal",
+  "hippocampus",                       "Hippocampus",                       "parahippocampal"
+)
+```
+
+the mapping to `ggseg` labels is approximate. The Desikan-Killiany atlas
+parcellates the cortex into about 34 regions per hemisphere. And it
+doesn’t have “dlPFC” as a label. So I’m mapping “dlPFC” to
+“rostralmiddlefrontal,” which is the closest DK parcel. There should be
+lot of other issues, but it is just a practice, and Thanks agian for GPT
+helps me do such dirty work.
+
+``` r
+papers <- papers %>%
+  mutate(full_text = paste(Title, Abstract, sep = " "))
+
+# For each dictionary pattern
+region_counts <- brain_dict %>%
+  rowwise() %>%
+  mutate(
+    count = sum(str_detect(papers$full_text, 
+                           regex(pattern, ignore_case = TRUE)))
+  ) %>%
+  ungroup()
+
+# Aggregate 
+region_summary <- region_counts %>%
+  group_by(ggseg_label) %>%
+  summarise(
+    display_name = region_standard[which.max(count)],
+    total_mentions = sum(count),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_mentions))
+
+region_summary
+```
+
+    ## # A tibble: 27 × 3
+    ##    ggseg_label              display_name           total_mentions
+    ##    <chr>                    <chr>                           <int>
+    ##  1 rostralanteriorcingulate Anterior Cingulate                284
+    ##  2 rostralmiddlefrontal     Dorsolateral PFC                  107
+    ##  3 superiorparietal         Posterior Parietal                100
+    ##  4 parsopercularis          Inferior Frontal Gyrus             77
+    ##  5 caudalanteriorcingulate  Cingulate Cortex                   76
+    ##  6 insula                   Insula                             56
+    ##  7 paracentral              SMA / Pre-SMA                      47
+    ##  8 medialorbitofrontal      Medial PFC                         32
+    ##  9 precentral               Frontal Eye Fields                 30
+    ## 10 parstriangularis         Ventrolateral PFC                  29
+    ## # ℹ 17 more rows
+
+## Part 4: Mapping onto ggseg Brain Atlas
+
+The `ggseg` package lets you plot brain atlas parcellations using
+ggplot2 syntax. We need to join our frequency data with the atlas region
+names.
+
+``` r
+library(ggseg)
+library(sf)
+
+plot_data <- region_summary %>%
+  rename(region = ggseg_label) %>%
+  select(region, total_mentions)
+
+# ggseg version handling: dk might be a function (2.0+) or data (1.6.x)
+dk_atlas <- if (is.function(dk)) dk() else dk
+
+atlas_sf <- as.data.frame(dk_atlas) %>% st_as_sf()
+
+merged <- atlas_sf %>%
+  left_join(plot_data, by = "region")
+
+ggplot(merged) +
+  geom_sf(aes(fill = total_mentions), color = "gray30", linewidth = 0.2) +
+  scale_fill_gradient(low = "lightyellow", high = "red",
+                      na.value = "gray90",
+                      name = "Mention\nFrequency") +
+  labs(title = "Brain Regions Mentioned in Attentional Flexibility Literature",
+       subtitle = "Based on word frequency in abstracts (NOT a real meta-analysis!)",
+       caption = paste0("Data: PubMed search (n=", nrow(papers), 
+                        " papers, searched Mar 8, 2026) | Atlas: Desikan-Killiany")) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 10, color = "gray40"),
+    plot.caption = element_text(hjust = 0.5, size = 8, color = "gray50"),
+    legend.position = "right"
+  )
+```
+
+![](Portfolio3_files/figure-gfm/brain-plot-1.png)<!-- -->
+
+Maybe a frequency chart would be nice,I’ll come back to do that later
+***(Maybe)***

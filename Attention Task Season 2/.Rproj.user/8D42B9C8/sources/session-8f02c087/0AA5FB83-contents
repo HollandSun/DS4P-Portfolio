@@ -1,0 +1,462 @@
+---
+title: "Portfolio 2"
+output: github_document
+---
+
+## Part5: Attention Data Analysis
+
+Now that the attention data has been successfully extracted and saved as a CSV file, the next step is to perform statistical analyses and visualize the results. As described in the introduction, each participant completed multiple trials/blocks, so observations are correlated within participants. Participants themselves can be seen as a random sample. Therefore, participants are treated as a random effect to account for within-participant dependence and to allow individual differences in baseline levels. 
+
+```{r load-analysis-packages, warning = FALSE, message=FALSE}
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(tidyverse) 
+library(tidyr)
+library(R.matlab)
+```
+
+### 5.1 Data Preparation
+
+First, let's load the attention data and recode variables into meaningful labels.
+
+```{r attention-data-prep, warning = FALSE, message=FALSE}
+att <- read.csv("attention_data.csv")
+
+# recoding
+att$most_condition <- factor(ifelse(att$block_type %in% c(1, 3), "mostly_shift", "mostly_hold"))
+att$trial_type <- factor(ifelse(att$trial_type == 2, "shift", "hold"))
+att$Congruence <- factor(ifelse(att$congruence == 1, "congruent", "incongruent"))
+att$phase <- factor(ifelse(att$run %in% c(1, 3), "encoding", "retrieval"))
+att$subject_id <- factor(att$subid)
+
+str(att)
+```
+
+### 5.2 Encoding Phase Analysis
+
+For the encoding phase, we fit a 2 (most_condition: mostly_shift vs. mostly_hold) × 2 (trial_type: shift vs. hold) linear mixed-effects model with participant as random intercept.
+
+```{r encoding-model, warning = FALSE, message=FALSE}
+encoding_data <- att %>% filter(phase == "encoding")
+
+# Fit mixed-effects model
+encoding_model <- lmer(RT ~ most_condition * trial_type + (1 | subject_id), 
+                       data = encoding_data)
+
+summary(encoding_model)$varcor
+anova(encoding_model, type = 3)
+```
+
+A more intuition way to show is :
+```{r encoding-means, warning = FALSE, message=FALSE}
+encoding_means <- encoding_data %>%
+  group_by(most_condition, trial_type) %>%
+  summarize(
+    mean_RT = round(mean(RT, na.rm = TRUE), 3),
+    se_RT = round(sd(RT, na.rm = TRUE) / sqrt(n()), 4),
+    n = n(),
+    .groups = "drop"
+  )
+encoding_means
+```
+
+The key finding here is the **most_condition × trial_type interaction**: Under the mostly_hold condition, there is a large shift cost (shift trials are much slower than hold trials). However, under the mostly_shift condition, this difference nearly disappears, as participants are better adapted to shifting.
+
+```{r encoding-plot, warning = FALSE, message=FALSE, fig.width=7, fig.height=5}
+ggplot(encoding_means, aes(x = trial_type, y = mean_RT, 
+                            color = most_condition, shape = most_condition, group = most_condition)) +
+  geom_point(size = 3) +
+  geom_line(linewidth = 1) +
+  geom_errorbar(aes(ymin = mean_RT - se_RT, ymax = mean_RT + se_RT), width = 0.1) +
+  geom_text(aes(label = mean_RT), vjust = -1.2, size = 3.5) +
+  scale_color_manual(values = c("mostly_hold" = "#2196F3", "mostly_shift" = "#9C27B0"),
+                     labels = c("Mostly Hold", "Mostly Shift")) +
+  scale_shape_manual(values = c("mostly_hold" = 16, "mostly_shift" = 17),
+                     labels = c("Mostly Hold", "Mostly Shift")) +
+  labs(x = "Trial Type", y = "Response Time (s)", 
+       color = NULL, shape = NULL) +
+  scale_x_discrete(labels = c("hold" = "Hold", "shift" = "Shift")) +
+  theme_minimal() +
+  theme(legend.position = c(0.15, 0.95),
+        legend.background = element_rect(fill = "white", color = "black"),
+        text = element_text(size = 12))
+```
+
+
+### 5.3 Retrieval Phase Analysis
+
+For the retrieval phase, congruence (whether encoding and retrieval share the same block type) becomes relevant. So we fit a 2 (most_condition) × 2 (trial_type) × 2 (Congruence) mixed-effects model.
+
+```{r retrieval-model, warning = FALSE, message=FALSE}
+retrieval_data <- att %>% filter(phase == "retrieval")
+
+# Fit three-way mixed-effects model
+retrieval_model <- lmer(RT ~ most_condition * trial_type * Congruence + (1 | subject_id), 
+                        data = retrieval_data)
+
+# Random effects
+summary(retrieval_model)$varcor
+
+# ANOVA table
+anova(retrieval_model, type = 3)
+```
+
+Let's examine the cell means:
+```{r retrieval-means, warning = FALSE, message=FALSE}
+retrieval_means <- retrieval_data %>%
+  group_by(most_condition, trial_type, Congruence) %>%
+  summarize(
+    mean_RT = round(mean(RT, na.rm = TRUE), 3),
+    se_RT = round(sd(RT, na.rm = TRUE) / sqrt(n()), 4),
+    n = n(),
+    .groups = "drop"
+  )
+retrieval_means
+```
+
+The retrieval phase yields a significant three-way interaction (most_condition × trial_type × Congruence). This is an interesting result. Congruence appears to slightly modulate the magnitude of the effect under certain conditions. For incongruent trials, participants actually seem to adapt better to shifting: transitioning from holding to shifting (or vice versa) appears to make shifting trials themselves more fluent. This may reflect a form of abstract rule-based attentional flexibility.
+
+```{r retrieval-plot, warning = FALSE, message=FALSE, fig.width=10, fig.height=5}
+ggplot(retrieval_means, aes(x = trial_type, y = mean_RT, 
+                             color = most_condition, shape = most_condition, group = most_condition)) +
+  geom_point(size = 3) +
+  geom_line(linewidth = 1) +
+  geom_errorbar(aes(ymin = mean_RT - se_RT, ymax = mean_RT + se_RT), width = 0.1) +
+  geom_text(aes(label = mean_RT), vjust = -1.2, size = 3.5) +
+  facet_wrap(~ Congruence) +
+  scale_color_manual(values = c("mostly_hold" = "#2196F3", "mostly_shift" = "#9C27B0"),
+                     labels = c("Mostly Hold", "Mostly Shift")) +
+  scale_shape_manual(values = c("mostly_hold" = 16, "mostly_shift" = 17),
+                     labels = c("Mostly Hold", "Mostly Shift")) +
+  labs(x = "Trial Type", y = "Response Time (s)", 
+       color = NULL, shape = NULL) +
+  scale_x_discrete(labels = c("hold" = "Hold", "shift" = "Shift")) +
+  theme_minimal() +
+  theme(legend.position = c(0.08, 0.95),
+        legend.background = element_rect(fill = "white", color = "black"),
+        text = element_text(size = 12),
+        strip.text = element_text(size = 13, face = "bold"))
+```
+
+
+## Part6: Memory Data Extraction
+
+As mentioned at the beginning, the memory component involves more complex extraction steps. In this part, I will translate the memory extraction pipeline from my Matlab code into R. The key idea is: memory is tested at the **pair level** — run 1 (encoding) pairs with run 2 (retrieval), and run 3 pairs with run 4. During the retrieval run, participants are tested on items they saw during encoding. 
+
+The critical variables to extract from memory data are:
+  
+## Memory Data Extraction
+
+However, this memory dataset had several issues during data collection.
+
++ the task scripts were not fully consistent across participants. As a result, for the earlier and later portions of the sample, the response keys were stored in different cells.
+
++ some participants forgot the instructions and chose to skip trials by pressing the space bar.
+
++ in some trials, the location of the correct answer was not stored properly.
+
++ the correct answer information was also saved in different places depending on the script version. For some participants, it was stored in `testorder`, whereas for others it was stored in `testselection`.
+
++ memory extraction differs fundamentally from attention extraction. In the attention task, each block can be analyzed independently. In contrast, for the memory task, encoding and retrieval do not occur in the same block. Therefore, we need to extract two runs simultaneously, analyze the retrieval run, and then determine whether each memory trial is congruent or incongruent relative to its encoding run.
+
+Therefore, the logic of the memory extraction function is relatively straightforward. We first read the data from Run 2 and Run 4. Then, we check whether the second list in `testselection` contains `0`. If it does, we extract `testorder` from the corresponding 12th or 14th list. Meanwhile, for `testselection`, we only read the raw key codes as they were stored. For Run 2, the responses are read from the second list of `testselection`; for Run 4, they are read from the fourth list. After that, we record each trial index and which block it belongs to, and then compute whether each trial is congruent or incongruent.
+
+### 6.1 Memory Extraction Function
+
+The logic follows the Matlab extraction code (see `data_extract.m`). For each participant, we load 4 runs, pair them (run1→run2, run3→run4), and extract memory test data from the retrieval runs (run 2 and run 4). The `testorder` and `testselection` fields in the Matlab structure contain the key information.
+
+```{r memory-extract-function, warning = FALSE, message=FALSE}
+
+get_p_field <- function(mat_obj, field_name) {
+  tryCatch({
+    mat_obj$p[field_name, 1, 1][[1]]
+  }, error = function(e) NULL)
+}
+
+# helper: flatten nested MATLAB cell/list structure
+flatten_nested <- function(x) {
+  if (is.null(x)) return(NULL)
+  if (is.atomic(x)) return(x)
+  if (is.list(x)) return(unlist(lapply(x, flatten_nested), recursive = TRUE, use.names = FALSE))
+  return(NULL)
+}
+
+# extract one retrieval run (run2 or run4)
+extract_memory_run <- function(p_enc, p_ret, pair_num) {
+  
+  subject_id  <- suppressWarnings(as.numeric(get_p_field(p_enc, "PID")))
+  enc_run     <- suppressWarnings(as.numeric(get_p_field(p_enc, "run")))
+  ret_run     <- suppressWarnings(as.numeric(get_p_field(p_ret, "run")))
+  enc_version <- suppressWarnings(as.numeric(get_p_field(p_enc, "Version")))
+  ret_version <- suppressWarnings(as.numeric(get_p_field(p_ret, "Version")))
+  
+  # define block type
+  enc_block <- ifelse(enc_version %in% c(1, 3), "mostly_shift", "mostly_hold")
+  ret_block <- ifelse(ret_version %in% c(1, 3), "mostly_shift", "mostly_hold")
+  
+  # define congruence
+  congruence <- ifelse(enc_version == ret_version, "congruent", "incongruent")
+  
+  # read raw testselection and testorder
+  ts <- get_p_field(p_ret, "testselection")
+  to <- get_p_field(p_ret, "testorder")
+  
+  if (is.null(ts) || is.null(to)) return(NULL)
+  if (!is.list(ts) || !is.list(to)) return(NULL)
+  
+  # run2 uses testselection[[2]], run4 uses testselection[[4]]
+  sel_idx <- ifelse(ret_run == 2, 2,
+                    ifelse(ret_run == 4, 4, NA))
+  
+  # if run2/run4 not matched, stop
+  if (is.na(sel_idx)) return(NULL)
+  
+  # extract raw selection
+  raw_selection <- tryCatch({
+    as.numeric(flatten_nested(ts[[sel_idx]]))
+  }, error = function(e) NULL)
+  
+  if (is.null(raw_selection) || length(raw_selection) == 0) return(NULL)
+  
+  # determine where to get correct answer
+  # rule from your description:
+  # check whether testselection[[2]] contains 0
+  # if yes, use testorder[[12]] for run2 and testorder[[14]] for run4
+  testselection_second <- tryCatch({
+    as.numeric(flatten_nested(ts[[2]]))
+  }, error = function(e) NULL)
+  
+  has_zero_in_second <- !is.null(testselection_second) && any(testselection_second == 0, na.rm = TRUE)
+  
+  raw_testorder <- NULL
+  
+  if (has_zero_in_second) {
+    order_idx <- ifelse(ret_run == 2, 12,
+                        ifelse(ret_run == 4, 14, NA))
+    
+    raw_testorder <- tryCatch({
+      as.numeric(flatten_nested(to[[order_idx]]))
+    }, error = function(e) NULL)
+  } else {
+    # fallback: use the same retrieval-linked slot
+    raw_testorder <- tryCatch({
+      as.numeric(flatten_nested(to[[sel_idx]]))
+    }, error = function(e) NULL)
+  }
+  
+  if (is.null(raw_testorder) || length(raw_testorder) == 0) return(NULL)
+  
+  # align lengths
+  n <- min(length(raw_selection), length(raw_testorder))
+  raw_selection <- raw_selection[1:n]
+  raw_testorder <- raw_testorder[1:n]
+  
+  # build tibble
+  tibble(
+    SubjectID = subject_id,
+    Pair = pair_num,
+    EncodingRun = enc_run,
+    RetrievalRun = ret_run,
+    EncodingBlock = enc_block,
+    RetrievalBlock = ret_block,
+    Congruence = congruence,
+    Trial = seq_len(n),
+    TestOrder = raw_testorder,
+    Selection = raw_selection
+  )
+}
+
+# combine run1-run2 and run3-run4
+extract_memory_subject <- function(run1, run2, run3, run4) {
+  pair1 <- extract_memory_run(run1, run2, pair_num = 1)
+  pair2 <- extract_memory_run(run3, run4, pair_num = 2)
+  bind_rows(pair1, pair2)
+}
+```
+
+### 6.2 Batch Processing for Memory Data
+
+Similar to the attention batch processing, we loop through all participants' files and extract memory data.
+
+```{r memory-batch, warning = FALSE, message=FALSE}
+all_files <- list.files("data", pattern = "Within_run.*\\.mat$", full.names = TRUE)
+all_files <- sort(all_files)
+
+all_memory <- list()
+
+for (i in seq(1, length(all_files), by = 4)) {
+  
+  if ((i + 3) > length(all_files)) next
+  
+  run1 <- tryCatch(readMat(all_files[i]),   error = function(e) NULL)
+  run2 <- tryCatch(readMat(all_files[i+1]), error = function(e) NULL)
+  run3 <- tryCatch(readMat(all_files[i+2]), error = function(e) NULL)
+  run4 <- tryCatch(readMat(all_files[i+3]), error = function(e) NULL)
+  
+  if (is.null(run1) || is.null(run2) || is.null(run3) || is.null(run4)) next
+  
+  memory_result <- extract_memory_subject(run1, run2, run3, run4)
+  
+  if (!is.null(memory_result) && nrow(memory_result) > 0) {
+    subid <- suppressWarnings(as.numeric(get_p_field(run1, "PID")))
+    all_memory[[as.character(subid)]] <- memory_result
+  }
+}
+
+memory_data <- bind_rows(all_memory)
+
+write.csv(memory_data, "memory_data.csv", row.names = FALSE)
+
+cat("Total memory trials:", nrow(memory_data), "\n")
+cat("Number of participants:", length(unique(memory_data$SubjectID)), "\n")
+
+head(memory_data)
+```
+
+## Part7: Memory Data Analysis
+
+### 7.1 Accuracy Summary
+
+First, let's compute per-participant accuracy rates, aggregated by RetrievalBlock and Congruence.
+
+```{r memory-accuracy-summary, warning=FALSE, message=FALSE}
+memory_data <- memory_data %>%
+  mutate(
+    Correct = case_when(
+      Selection == 66 ~ NA_real_,
+      Selection == 53 & TestOrder == 1 ~ 1,
+      Selection == 59 & TestOrder == 2 ~ 1,
+      TRUE ~ 0
+    )
+  )
+
+table(memory_data$Correct, useNA = "ifany")
+memory_data <- memory_data %>%
+  mutate(
+    SubjectID = factor(SubjectID),
+    RetrievalBlock = factor(RetrievalBlock),
+    Congruence = factor(Congruence)
+  )
+
+# Per-participant accuracy by condition
+memory_summary <- memory_data %>%
+  group_by(SubjectID, RetrievalBlock, Congruence) %>%
+  summarise(
+    accuracy = mean(Correct, na.rm = TRUE),
+    n_trials = n(),
+    .groups = "drop"
+  )
+
+memory_summary
+```
+
+<span style="color: deepskyblue;">*Note: I recoded one participant with a 0% accuracy rate as 1 (inverted). This participant did respond on every trial — it was not possible to advance without a keypress — so this means they consistently selected the incorrect option.*</span>
+
+### 7.2 Mixed-Effects ANOVA on Accuracy (Aggregated)
+
+Since memory accuracy is aggregated at the participant-pair level (each participant contributes 2 observations — one per pair), and variability is quite small with the current sample size, I first fit a linear mixed-effects model on the aggregated accuracy rates.
+
+```{r memory-lmer, warning=FALSE, message=FALSE}
+library(lme4)
+library(lmerTest)
+
+memory_model_agg <- lmer(
+  accuracy ~ RetrievalBlock * Congruence + (1 | SubjectID),
+  data = memory_summary
+)
+
+summary(memory_model_agg)
+anova(memory_model_agg, type = 3)
+```
+
+### 7.3 Memory Accuracy Visualization
+
+```{r memory-plot, warning=FALSE, message=FALSE, fig.width=7, fig.height=5}
+library(emmeans)
+library(ggplot2)
+
+# Estimated marginal means
+memory_emm <- emmeans(memory_model_agg, ~ RetrievalBlock * Congruence)
+memory_emm_df <- as.data.frame(memory_emm)
+
+ggplot(memory_emm_df,
+       aes(x = Congruence,
+           y = emmean,
+           color = RetrievalBlock,
+           shape = RetrievalBlock,
+           group = RetrievalBlock)) +
+  geom_point(size = 3) +
+  geom_line(linewidth = 1) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.1) +
+  geom_text(aes(label = round(emmean, 3)), vjust = -1.5, size = 3.5) +
+  scale_color_manual(
+    values = c("mostly_hold" = "#2196F3", "mostly_shift" = "#9C27B0"),
+    labels = c("Mostly Hold", "Mostly Shift")
+  ) +
+  scale_shape_manual(
+    values = c("mostly_hold" = 16, "mostly_shift" = 17),
+    labels = c("Mostly Hold", "Mostly Shift")
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(),
+    limits = c(0.7, 1.0)
+  ) +
+  labs(
+    x = "Congruence",
+    y = "Memory Accuracy (Estimated Marginal Means)",
+    title = "Memory Accuracy: Mixed-Effects ANOVA",
+    color = "Retrieval Block",
+    shape = "Retrieval Block"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 12),
+    legend.position = "top"
+  )
+```
+
+
+### 7.4 Logistic GLMM (Trial-Level)
+
+Since the outcome variable (Correct) is binary, a more appropriate analysis is a logistic generalized linear mixed-effects model at the trial level. We include TestOrder as a covariate (whether the correct answer was on top or bottom) and participant as random intercept.
+
+```{r memory-glmm, warning=FALSE, message=FALSE}
+memory_data <- memory_data %>%
+  mutate(TestOrder_numeric = as.numeric(TestOrder))
+
+memory_glmm <- glmer(
+  Correct ~ RetrievalBlock * Congruence + TestOrder_numeric + (1 | SubjectID),
+  data = memory_data,
+  family = binomial
+)
+
+summary(memory_glmm)
+```
+
+```{r memory-glmm-anova, warning = FALSE, message=FALSE}
+anova(memory_glmm, type = 3)
+```
+
+Let's also look at the predicted accuracy for each condition (holding TestOrder at its mean):
+
+```{r memory-predicted, warning=FALSE, message=FALSE}
+pred_data <- expand.grid(
+  RetrievalBlock = levels(memory_data$RetrievalBlock),
+  Congruence = levels(memory_data$Congruence),
+  SubjectID = memory_data$SubjectID[1],
+  TestOrder_numeric = mean(memory_data$TestOrder_numeric, na.rm = TRUE)
+)
+
+pred_data$predicted_acc <- predict(
+  memory_glmm,
+  newdata = pred_data,
+  type = "response"
+)
+
+pred_data
+```
+
+As shown, all effects in the memory analysis are non-significant. Memory accuracy showed no significant difference between mostly_shift and mostly_hold conditions, between congruent and incongruent conditions, and the interaction was also non-significant. The overall accuracy rates are quite high (around 87-89%), and the sample size is still small (20 usable participants, ~40 observations). This is consistent with the pilot nature of the study — the memory component will need refinement in later stages.
+
+Finally, the same not-so-exciting result in the memory part. But still great — the pipeline works, and the data extraction framework established here provides a solid foundation for the full experiment.

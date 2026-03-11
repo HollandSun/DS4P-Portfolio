@@ -1,0 +1,253 @@
+---
+title: "Holland Portfolio 8: EFA and CFA in R"
+---
+
+In my stats courses we've talked a lot about factor analysis — both exploratory (EFA) and confirmatory (CFA). But most of the time we just look at tables of factor loadings and fit indices, which is... not very exciting. This portfolio is a quick exercise in doing both EFA and CFA in R, with an emphasis on making the results actually visible.
+
+## Portfolio Goals
+
++ Simulate data with a known factor structure
++ Run EFA to "discover" the structure from the data
++ Run CFA to confirm it
++ Visualize the results: loading heatmaps, path diagrams, and fit comparison
+
+
+
+## Part 1: Setup and Data Simulation
+
+I'll simulate data with 3 latent factors, each measured by 4 items. The nice thing about simulated data is we know the ground truth, so we can check whether EFA and CFA recover it correctly.
+
+```{r setup, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(lavaan)
+library(psych)
+library(semPlot)
+library(corrplot)
+```
+
+```{r simulate}
+set.seed(2026)
+n <- 400
+
+# 3 latent factors
+F1 <- rnorm(n)
+F2 <- rnorm(n)
+F3 <- rnorm(n)
+
+# Allow some correlation between factors
+F2 <- 0.3 * F1 + sqrt(1 - 0.3^2) * F2
+F3 <- 0.2 * F1 + sqrt(1 - 0.2^2) * F3
+
+# 4 items per factor, loadings between 0.5 and 0.8
+dat <- tibble(
+  x1 = 0.75*F1 + rnorm(n, sd = 0.5),
+  x2 = 0.70*F1 + rnorm(n, sd = 0.5),
+  x3 = 0.65*F1 + rnorm(n, sd = 0.5),
+  x4 = 0.60*F1 + rnorm(n, sd = 0.5),
+  x5 = 0.80*F2 + rnorm(n, sd = 0.5),
+  x6 = 0.70*F2 + rnorm(n, sd = 0.5),
+  x7 = 0.65*F2 + rnorm(n, sd = 0.5),
+  x8 = 0.55*F2 + rnorm(n, sd = 0.5),
+  x9 = 0.75*F3 + rnorm(n, sd = 0.5),
+  x10 = 0.70*F3 + rnorm(n, sd = 0.5),
+  x11 = 0.60*F3 + rnorm(n, sd = 0.5),
+  x12 = 0.50*F3 + rnorm(n, sd = 0.5)
+)
+
+cat("Simulated:", n, "observations,", ncol(dat), "items\n")
+```
+
+
+### Correlation matrix
+
+Before doing any factor analysis, let's just look at the correlations. If the factor structure is real, we should see blocks of higher correlations among items that share a factor.
+
+```{r corr-matrix, fig.width=7, fig.height=6}
+cor_mat <- cor(dat)
+
+corrplot(cor_mat, method = "color", type = "lower",
+         tl.col = "black", tl.cex = 0.9,
+         addCoef.col = "black", number.cex = 0.6,
+         col = colorRampPalette(c("#2980B9", "white", "#E74C3C"))(200),
+         title = "Correlation Matrix: 12 Items",
+         mar = c(0, 0, 2, 0))
+```
+
+You can already see the three blocks: x1-x4, x5-x8, x9-x12. That's a good sign — EFA should be able to pick this up.
+
+
+
+## Part 2: EFA — Exploratory Factor Analysis
+
+EFA doesn't assume any structure. It looks at the correlations and tries to find the best set of latent factors to explain them. The key decisions are: how many factors, and what rotation.
+
+### 2a: How many factors?
+
+```{r parallel-analysis, fig.width=7, fig.height=5}
+# Parallel analysis: compare eigenvalues from data vs. random data
+fa.parallel(dat, fa = "fa", main = "Parallel Analysis: How Many Factors?")
+```
+
+Parallel analysis compares our data's eigenvalues against what you'd expect from random noise. Factors are retained only if their eigenvalue exceeds the random baseline. It should suggest 3 factors here.
+
+
+### 2b: Run EFA
+
+```{r efa}
+efa_result <- fa(dat, nfactors = 3, rotate = "oblimin", fm = "ml")
+print(efa_result, cut = 0.3, sort = TRUE)
+```
+
+Oblimin rotation allows factors to be correlated, which is realistic for most psychological constructs. Let's visualize the loadings.
+
+```{r efa-heatmap, fig.width=8, fig.height=5}
+# Extract and reshape loadings for ggplot
+loadings_df <- as.data.frame(unclass(efa_result$loadings)) %>%
+  rownames_to_column("item") %>%
+  pivot_longer(-item, names_to = "factor", values_to = "loading")
+
+ggplot(loadings_df, aes(x = factor, y = fct_rev(item), fill = loading)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = round(loading, 2)), size = 3) +
+  scale_fill_gradient2(low = "#2980B9", mid = "white", high = "#E74C3C",
+                       midpoint = 0, limits = c(-1, 1)) +
+  labs(title = "EFA Factor Loadings (Oblimin Rotation)",
+       x = "Factor", y = "Item", fill = "Loading") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+```{r efa-diagram, fig.width=8, fig.height=6}
+fa.diagram(efa_result, main = "EFA Factor Structure")
+```
+
+If the simulation worked as intended, each item should load primarily on its "true" factor, with small cross-loadings on the other two. The heatmap makes this easy to see at a glance.
+
+
+
+## Part 3: CFA — Confirmatory Factor Analysis
+
+Now we pretend we didn't simulate the data. Based on EFA (or theory), we hypothesize a 3-factor structure and test it with CFA.
+
+```{r cfa}
+cfa_model <- '
+  F1 =~ x1 + x2 + x3 + x4
+  F2 =~ x5 + x6 + x7 + x8
+  F3 =~ x9 + x10 + x11 + x12
+'
+
+cfa_fit <- cfa(cfa_model, data = dat)
+summary(cfa_fit, fit.measures = TRUE, standardized = TRUE)
+```
+
+```{r cfa-fit}
+# Extract fit indices
+fit_vals <- fitMeasures(cfa_fit, c("chisq", "df", "pvalue", "cfi", "tli", 
+                                     "rmsea", "rmsea.ci.lower", "rmsea.ci.upper", "srmr"))
+fit_df <- tibble(
+  Index = names(fit_vals),
+  Value = round(as.numeric(fit_vals), 3)
+)
+fit_df
+```
+
+<span style="color: deepskyblue;">*(The conventional cutoffs: CFI > .95, TLI > .95, RMSEA < .06, SRMR < .08. With simulated data that follows the model exactly, fit should be excellent. In real data, it's never this clean.)*</span>
+
+
+### 3a: Path diagram
+
+```{r cfa-sempath, fig.width=9, fig.height=7}
+semPaths(cfa_fit,
+         whatLabels = "std",
+         style = "lisrel",
+         layout = "tree2",
+         edge.label.cex = 0.8,
+         sizeMan = 6, sizeLat = 10,
+         residuals = FALSE,
+         intercepts = FALSE,
+         nCharNodes = 0,
+         fade = FALSE,
+         edge.color = "gray30",
+         mar = c(2, 2, 2, 2))
+title("CFA: 3-Factor Model (Standardized Loadings)", line = -1)
+```
+
+
+### 3b: Standardized loadings comparison
+
+```{r loading-comparison, fig.width=9, fig.height=5}
+# Extract CFA standardized loadings
+std_est <- standardizedSolution(cfa_fit)
+cfa_loadings <- std_est %>%
+  filter(op == "=~") %>%
+  select(item = rhs, factor = lhs, cfa_loading = est.std)
+
+# Compare with EFA primary loadings
+efa_primary <- loadings_df %>%
+  group_by(item) %>%
+  slice_max(abs(loading), n = 1) %>%
+  ungroup() %>%
+  select(item, efa_loading = loading)
+
+comparison <- cfa_loadings %>%
+  left_join(efa_primary, by = "item")
+
+ggplot(comparison, aes(x = efa_loading, y = cfa_loading)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  geom_point(aes(color = factor), size = 3, alpha = 0.8) +
+  geom_text(aes(label = item), nudge_y = 0.02, size = 2.5) +
+  scale_color_manual(values = c("F1" = "#E74C3C", "F2" = "#2980B9", "F3" = "#27AE60")) +
+  labs(title = "EFA vs CFA Standardized Loadings",
+       subtitle = "Points near the diagonal = EFA and CFA agree",
+       x = "EFA Primary Loading", y = "CFA Standardized Loading",
+       color = "Factor") +
+  coord_equal() +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+When EFA and CFA agree, the points cluster along the diagonal. Deviations suggest that the exploratory solution and the confirmatory model capture slightly different aspects of the data — which is normal, since EFA allows cross-loadings while CFA forces them to zero.
+
+
+### 3c: What if we get the structure wrong?
+
+Let's see what happens when we specify a wrong model — say, a 2-factor model that lumps F2 and F3 together.
+
+```{r cfa-wrong}
+wrong_model <- '
+  F1 =~ x1 + x2 + x3 + x4
+  F23 =~ x5 + x6 + x7 + x8 + x9 + x10 + x11 + x12
+'
+
+wrong_fit <- cfa(wrong_model, data = dat)
+
+# Compare fit
+fit_comparison <- tibble(
+  Index = c("CFI", "TLI", "RMSEA", "SRMR"),
+  Correct_3F = round(as.numeric(fitMeasures(cfa_fit, c("cfi","tli","rmsea","srmr"))), 3),
+  Wrong_2F = round(as.numeric(fitMeasures(wrong_fit, c("cfi","tli","rmsea","srmr"))), 3)
+)
+
+fit_comparison
+```
+
+```{r fit-viz, fig.width=8, fig.height=4}
+fit_comparison %>%
+  pivot_longer(-Index, names_to = "model", values_to = "value") %>%
+  ggplot(aes(x = Index, y = value, fill = model)) +
+  geom_col(position = "dodge", width = 0.6, alpha = 0.85) +
+  geom_text(aes(label = value), position = position_dodge(width = 0.6),
+            vjust = -0.3, size = 3) +
+  scale_fill_manual(values = c("Correct_3F" = "#27AE60", "Wrong_2F" = "#E74C3C"),
+                    labels = c("3-Factor (correct)", "2-Factor (wrong)")) +
+  labs(title = "Model Fit Comparison: Correct vs. Misspecified Model",
+       y = "Fit Index Value", x = NULL, fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "bottom")
+```
+
+The correct 3-factor model should show better fit on every index. This is the whole point of CFA: testing whether your theoretical structure actually fits the data better than alternatives.
+
+
+<span style="color: deepskyblue;">*Bravo!!! EFA finds the structure, CFA confirms it, and the misspecified model proves why getting the structure right matters. The heatmap and the EFA-vs-CFA scatter plot are my favorite parts — they make factor loadings way more digestible than a wall of numbers.*</span>
