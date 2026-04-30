@@ -1,0 +1,470 @@
+---
+title: "Portfolio_Iterated_Prisoners_Dilemma"
+author: "Holland Sun"
+output: github_document
+---
+
+```{r global-opts, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE,
+                      fig.align = "center", dpi = 110)
+```
+
+The inspiration for this project came from a video I swiped on a short video platform.
+**Iterated Prisoner's Dilemma** The setup is famous: in each round, two players independently choose to **cooperate** or **defect**. If both cooperate, each gets 3 points. If both defect, each gets 1 point. If one defects while the other cooperates, the defector gets 5 and the cooperator gets 0. 
+
+There are some really nice interactive websites about this like [The Evolution of Trust](https://ncase.me/trust/) by Nicky Case. But I wanted to actually write the simulator (yeah, the stimulation topic) myself in this portfoio.
+
+## Portfolio Goals
+
++ Implement Axelrod's classic strategies as plain R functions (Tit for Tat, Grim Trigger, Pavlov, etc.)
++ Add one extra strategy that came from a study-group conversation, just to see how it stacks up against the textbook ones
++ Run a full round-robin tournament and visualize the pairwise + total scores
++ End with a quick look at Press & Dyson (2012) 
+
+## Intro
+
+In 1979, **Robert Axelrod**, a political scientist at the University of Michigan, sent out an invitation to game theorists across the world: *send me a program that plays the Iterated Prisoner's Dilemma, and I'll run them all against each other in a round-robin tournament.* He got 14 entries, plus a "Random" baseline. They ranged from a few lines of FORTRAN to multi-page algorithms with elaborate opponent-modeling.
+
+The winner was the shortest entry. Submitted by Anatol Rapoport, a mathematical psychologist at the University of Toronto, it was four lines long and called **Tit for Tat**: cooperate on round one, then on every following round, copy whatever your opponent did last round. That was it. <span style="color: deepskyblue;">*(Interestingly, Axelrod ran a second tournament in 1980 with 62 entries, including many designed specifically to beat Tit for Tat. Tit for Tat won again. )*</span>
+
+OK enough history for now.
+
+## Part 1: Setting Up
+ <span style="color: deepskyblue;"> Here's Holland comment about the code part </span>
+I think the hardest part of this portfolio was figuring out how to turn the imagined simulation into actual code. This part took me a lot of time. Of courses, firstly I ruled out the brute-force approach......
+
+My final idea was to imagine each strategy as a “person,” and each person has a variable that stores its history, almost like its identity information. When two strategies play against each other, the code first reads the identity information of both players. Then the strategy decision becomes a function that loads these two history variables and uses them to decide what to do next.
+
+Becasue every strategy function had to include the game rules, So I separated the game rules out and treated them as a shared pool. More specifically, I first created a payoff matrix, which works as a lookup table for scores under different combinations of moves. Each strategy function only needs to decide the current move based on its own past behavior and the opponent’s past behavior. So it take each strategy function takes my_hist and opp_hist as inputs, and returns either "C" or "D".Finally, in the match function, I used a loop to simulate repeated interactions. In each round, the code passes the history so far into the two strategy functions, gets the two players’ current moves, then uses the payoff matrix to look up their scores. 
+
+The first round is a special case because neither player has any history yet. So the strategy functions receive empty history vectors in round 1. Because of this, any strategy that depends on previous behavior has to define what it will do in the first round.
+```{r setup}
+library(tidyverse)
+library(ggrepel)
+library(scales)
+library(patchwork)
+
+# T=5, R=3, P=1, S=0
+PAYOFF <- matrix(
+  c(3, 0, 5, 1),
+  nrow = 2, byrow = TRUE,
+  dimnames = list(c("C", "D"), c("C", "D"))
+)
+PAYOFF
+```
+
+The payoff matrix is: my row is what I played, the opponent's column is what they played, and the cell is *my* score for that round. So `PAYOFF["C", "D"] = 0` means "I cooperated, they defected, I got the 0 or another name <span style="color: deepskyblue;">"sucker's payoff". lol </span>
+
+Now I need a function that plays one match between two strategies, and each strategy takes two intput `my_hist` and `opp_hist`    
+and returns either `"C"` or `"D"`.
+
+```{r match}
+# strat_a vs strat_b, total n_rounds 
+play_match <- function(strat_a, strat_b, n_rounds = 200, noise = 0) {
+
+  moves_a <- character(n_rounds)
+  moves_b <- character(n_rounds)
+  score_a <- numeric(n_rounds)
+  score_b <- numeric(n_rounds)
+
+  for (t in seq_len(n_rounds)) {
+    # the identity infromation
+    a <- strat_a(moves_a[seq_len(t - 1)], moves_b[seq_len(t - 1)])
+    b <- strat_b(moves_b[seq_len(t - 1)], moves_a[seq_len(t - 1)])
+
+
+    moves_a[t] <- a
+    moves_b[t] <- b
+    score_a[t] <- PAYOFF[a, b]
+    score_b[t] <- PAYOFF[b, a]
+  }
+
+  tibble(
+    round   = seq_len(n_rounds),
+    move_a  = moves_a,
+    move_b  = moves_b,
+    score_a = score_a,
+    score_b = score_b
+  )
+}
+```
+
+<span style="color: deepskyblue;">*I originally passed the full pre-allocated `moves_a` / `moves_b` vectors into the strategy functions, which meant they could "see" empty `""` slots for future rounds.....*</span>
+
+## Part 2: Implemention
+
+Build the corresponding function of different strategies
+
+```{r strategies}
+# ==================== 确定性策略 ====================
+
+# always collaboration
+always_c <- function(my_hist, opp_hist) "C"
+
+# always defection
+always_d <- function(my_hist, opp_hist) "D"
+
+# Tit for Tat 
+tft <- function(my_hist, opp_hist) {
+  if (length(opp_hist) == 0) "C"
+  else opp_hist[length(opp_hist)]
+}
+
+
+# Grim Trigger borken heart
+grim <- function(my_hist, opp_hist) {
+  if (any(opp_hist == "D")) "D" else "C"
+}
+
+# Pavlov / Win-Stay, Lose-Shift
+# "win" get R(=3) or T(=5) → repeat
+# "lose" get P(=1) or S(=0) → switch
+pavlov <- function(my_hist, opp_hist) {
+  if (length(my_hist) == 0) return("C")
+  last_my  <- my_hist[length(my_hist)]
+  last_opp <- opp_hist[length(opp_hist)]
+  win <- (last_opp == "C")              
+  if (win) last_my else (if (last_my == "C") "D" else "C")
+}
+
+# random baseline
+random_strat <- function(my_hist, opp_hist) {
+  sample(c("C", "D"), 1)
+}
+
+# Tit for Two Tats fogive one time
+tf2t <- function(my_hist, opp_hist) {
+  n <- length(opp_hist)
+  if (n < 2) return("C")
+  if (opp_hist[n] == "D" && opp_hist[n - 1] == "D") "D" else "C"
+}
+
+# Generous Tit for Tat — Occasionally forgive one time
+gtft <- function(my_hist, opp_hist) {
+  if (length(opp_hist) == 0) return("C")
+  last_opp <- opp_hist[length(opp_hist)]
+  if (last_opp == "C") "C"
+  else if (runif(1) < 0.33) "C" else "D"   # 33%
+}
+
+# Joss — TFT 但 10% 概率偷偷背叛
+joss <- function(my_hist, opp_hist) {
+  if (length(opp_hist) == 0) return("C")
+  last_opp <- opp_hist[length(opp_hist)]
+  base <- last_opp                # same as TFT
+  if (base == "C" && runif(1) < 0.10) "D" else base
+}
+
+```
+
+GTFT and Pavlov are not actually in Axelrod's 1980 entries. I also listed some variants of tit-for-tat, which deal with how to handle noisy data—such as when the other party accidentally makes a mistake. However, it seems that this approach performs better in the presence of noisy data.
+
+
+WI shared my idea with my roommate while I was cooking, he pointed out that: every strategy I had so far only looks at the **last one or two moves**. None of them looks at the opponent's *whole record*. He suggested: *"What if you just count — has the opponent cooperated more often than they've defected? If yes, cooperate. If no, defect."*. emmm That sounds pretty reasonable.
+```{r roomatefunction}
+roomatef <- function(my_hist, opp_hist) {
+  if (length(opp_hist) == 0) return("C")
+  n_c <- sum(opp_hist == "C")
+  n_d <- sum(opp_hist == "D")
+  if (n_c >= n_d) "C" else "D"
+}
+
+# wrap up
+strategies <- list(
+  AllC      = always_c,
+  AllD      = always_d,
+  TFT       = tft,
+  TF2T      = tf2t,
+  Grim      = grim,
+  Pavlov    = pavlov,
+  Random    = random_strat,
+  GTFT      = gtft,
+  Joss      = joss,
+  Roomatef   = roomatef
+)
+length(strategies)
+```
+
+## Part 3: Pairwise Matchups
+
+Before running the full tournament, let me play a few specific pairs and look at the cumulative score curves.
+
+```{r pairwise-demo, fig.width=11, fig.height=6}
+set.seed(42)
+
+demo_pairs <- tribble(
+  ~label,                 ~strat_a,    ~strat_b,
+  "AllC vs AllD",         "AllC",      "AllD",
+  "TFT vs AllD",          "TFT",       "AllD",
+  "TFT vs TFT",           "TFT",       "TFT",
+  "Roomatef vs Joss",      "Roomatef",   "Joss",
+  "Pavlov vs TFT",        "Pavlov",    "TFT",
+  "Joss vs TFT",          "Joss",      "TFT"
+)
+
+demo_results <- demo_pairs |>
+  pmap_dfr(function(label, strat_a, strat_b) {
+    res <- play_match(strategies[[strat_a]], strategies[[strat_b]],
+                      n_rounds = 200)
+    res |>
+      mutate(label    = label,
+             cum_a    = cumsum(score_a),
+             cum_b    = cumsum(score_b),
+             player_a = strat_a,
+             player_b = strat_b)
+  })
+
+demo_long <- demo_results |>
+  select(label, round, player_a, player_b, cum_a, cum_b) |>
+  pivot_longer(c(cum_a, cum_b),
+               names_to = "who", values_to = "cum_score") |>
+  mutate(player = ifelse(who == "cum_a", player_a, player_b),
+         line   = ifelse(who == "cum_a", "Player A", "Player B"))
+
+ggplot(demo_long, aes(x = round, y = cum_score, color = player, linetype = line)) +
+  geom_line(linewidth = 0.9) +
+  facet_wrap(~ label, ncol = 3, scales = "free_y") +
+  scale_color_brewer(palette = "Set1") +
+  labs(title    = "Cumulative Score Across 200 Rounds — A Few Telling Matchups",
+       subtitle = "Solid = Player A | Dashed = Player B",
+       x = "Round", y = "Cumulative score", color = "Strategy") +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(face = "bold"))
+```
+
+Result
+
++ **AllC vs AllD** is unsuprised— AllD takes the cooperator for 5 points every round and take away 1000 points from AllC's 0.
++ **TFT vs AllD**  TFT loses round 1 (gets sucker'd), retaliates from round 2 onwards, and ends up just one point behind AllD after 200 rounds. *Losing by 1*.
++ **TFT vs TFT** is the dream — 200 rounds of mutual cooperation, both end up at 600. This is what makes TFT so valuable in a population of TFTs.
++ **Roomatef vs Joss** this match can be interesting, Joss looks "mostly cooperative" byfull-history accounting (90% C, 10% D), so the strategy of my roommate keeps cooperating and eats the 10% defections one by one without ever switching to retaliation. Whether that's "wisdom" or "being a doormat" ??
++ **Joss vs TFT** is a liitle bit pity. Joss is "TFT but occasionally cheats", which sounds harmless. But once Joss accidentally defects, TFT retaliates next round, Joss copies that, TFT retaliates again, and they end up locked into mutual defection forever. <span style="color: deepskyblue;">*Two strategies that mostly want to cooperate end up trapped, that's why we need forgiveness. *</span>
+
+## Part 4: The Round-Robin Tournament
+
+Now the main event. Every strategy plays every other strategy (including itself), 200 rounds per match, repeated 5 times to average out the stochastic strategies (Random, GTFT, Joss). Total: `10 × 10 × 5 = 500` matches.
+
+```{r tournament}
+set.seed(42)
+
+run_tournament <- function(strategies, n_rounds = 200, n_reps = 5,
+                           noise = 0) {
+
+  pairs <- expand_grid(a = names(strategies),
+                       b = names(strategies),
+                       rep = seq_len(n_reps))
+
+  pairs |>
+    pmap_dfr(function(a, b, rep) {
+      res <- play_match(strategies[[a]], strategies[[b]],
+                        n_rounds = n_rounds, noise = noise)
+      tibble(
+        strat_a   = a,
+        strat_b   = b,
+        rep       = rep,
+        avg_a     = mean(res$score_a),
+        avg_b     = mean(res$score_b),
+        coop_a    = mean(res$move_a == "C"),
+        coop_b    = mean(res$move_b == "C")
+      )
+    })
+}
+
+tourney <- run_tournament(strategies, n_rounds = 200, n_reps = 5, noise = 0)
+glimpse(tourney)
+```
+
+### 4.1 Pairwise Score Heatmap
+
+For each (row strategy, column strategy) pair, I'll show the row strategy's average per-round score.
+
+```{r heatmap, fig.width=8, fig.height=7}
+heat_data <- tourney |>
+  group_by(strat_a, strat_b) |>
+  summarise(score = mean(avg_a), .groups = "drop")
+
+# rank by total score
+strat_order <- heat_data |>
+  group_by(strat_a) |>
+  summarise(total = mean(score)) |>
+  arrange(total) |>
+  pull(strat_a)
+
+heat_data |>
+  mutate(strat_a = factor(strat_a, levels = strat_order),
+         strat_b = factor(strat_b, levels = strat_order)) |>
+  ggplot(aes(x = strat_b, y = strat_a, fill = score)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  geom_text(aes(label = sprintf("%.2f", score)), size = 3) +
+  scale_fill_gradient2(low = "#E74C3C", mid = "#F9F9F9", high = "#27AE60",
+                       midpoint = 2, name = "Avg score\nper round") +
+  labs(title    = "Pairwise Average Score",
+       x = "Opponent (column)", y = "Me (row)") +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+Some observations from the heatmap:
+
++ The **diagonal** is mostly green for the nice strategies (TFT, AllC, GTFT, Pavlov, TF2T) — they cooperate with themselves and rake in 3 per round.
++ **AllD's row** is yellow-ish almost everywhere — it picks off the cooperators and survives against the retaliators. But its diagonal cell is `1.00` because two AllDs lock into mutual defection.
++ **AllC's row** is the most asymmetric: green when it meets nice strategies, deep red against AllD and Joss.
++ **Random** is mediocre against everyone — defection-prone strategies pick on it, but it can't reliably cooperate with TFT either because half its moves are defections.
+
+### 4.2 Tournament Standings
+
+Aggregate over all opponents
+
+```{r standings, fig.width=9, fig.height=5}
+standings <- tourney |>
+  group_by(strat_a) |>
+  summarise(mean_score = mean(avg_a),
+            sd_score   = sd(avg_a),
+            .groups    = "drop") |>
+  arrange(desc(mean_score)) |>
+  mutate(rank = row_number())
+
+standings |>
+  ggplot(aes(x = reorder(strat_a, mean_score), y = mean_score,
+             fill = mean_score)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("%.2f", mean_score)), hjust = -0.15, size = 3.3) +
+  coord_flip() +
+  scale_fill_gradient(low = "#7FB3D3", high = "#27AE60", guide = "none") +
+  scale_y_continuous(limits = c(0, max(standings$mean_score) * 1.12)) +
+  labs(title    = "Round-Robin Tournament ",
+       x = NULL, y = "Average score per round") +
+  theme_minimal(base_size = 11)
+```
+
+```{r standings-table}
+standings$mean_score <- round(standings$mean_score, 3)
+standings$sd_score <- round(standings$sd_score, 3)
+
+print(standings)
+```
+
+The top of the leaderboard is the "nice retaliators" cluster — TFT, GTFT, TF2T, Pavlov, plus the **Roomatef** my friend suggested — followed by AllC (which take many points off other nice strategies but bleeds against AllD and Joss). AllD and Joss are mid-pack: they win their individual matches against cooperators but loss lots against retaliation. **Random** comes in dead last, basically by definition. 
+
+<span style="color: deepskyblue;">*I'm glad my roommate ranked high. I think this might be more of a life philosophy, people need to go through many experiences to judge whether someone is a good person or a jerk.*</span>
+
+### 4.3 Cooperation Rates
+
+The cooperation rate is also informative — strategies that *cause* their opponents to cooperate tend to do well, even if they themselves occasionally defect.
+
+```{r coop, fig.width=9, fig.height=5}
+coop_rates <- tourney |>
+  group_by(strat_a) |>
+  summarise(my_coop  = mean(coop_a),
+            opp_coop = mean(coop_b),
+            score    = mean(avg_a),
+            .groups  = "drop")
+
+ggplot(coop_rates, aes(x = my_coop, y = opp_coop, color = score, label = strat_a)) +
+  geom_point(size = 4) +
+  geom_text_repel(size = 3.8, max.overlaps = 20, color = "black",
+                  box.padding = 0.5) +
+  scale_x_continuous(labels = percent_format(), limits = c(0, 1)) +
+  scale_y_continuous(labels = percent_format(), limits = c(0, 1)) +
+  scale_color_gradient(low = "#E74C3C", high = "#27AE60",
+                       name = "Avg score") +
+  labs(title    = "How Much I Cooperate vs. How Much My Opponents Cooperate With Me",
+       x = "My cooperation rate (across all opponents)",
+       y = "Opponents' cooperation rate (when playing against me)") +
+  theme_minimal(base_size = 11)
+```
+
+This is one of my favorite plots.**AllD's opponents cooperate with it about 12% of the time** , that's basically just "the first round of TFT-like opponents before retaliation kicks in". AllD's whole edge comes from those few free rounds at the start. Meanwhile **TFT's opponents cooperate 80%+ of the time**, because TFT's retaliatory-but-forgiving structure *teaches* its opponents to cooperate.
+
+## Part 5: ...And Someone destroyed the heartwarming story
+
+During this project,I once asked Dr.Garrison to join. but due to the curse of knowledge, there was a class she toke specifically discussing this topic, centered around a famous pape published in PNAS titled *"Iterated Prisoner's Dilemma contains strategies that dominate any evolutionary opponent"*. .
+
+For 30s years the IPD literature had been a heartwarming story about how cooperation emerges from reciprocity. the idea of this paper roughly is: *"actually, you can also write down a strategy that lets you unilaterally extort the opponent for as much as you want, and there's nothing they can do about it within the rules of the game."*
+
+### The general solution
+
+I wanted to bring this portfolio to a satisfying conclusion, so I still hoped to briefly touch on this aspect at the end. Unfortunately, I had no prior knowledge in this area before. Fortunately, this article was presented in a rather "mathematical" manner, and with the help of Claude and Gemini, I roughly understood this part and attempted to present it here.
+
+The technical setup: any **memory-1 strategy** in the IPD can be described by four probabilities — the probability of cooperating after each of the four possible last-round outcomes:
+
++ `p1` = P(cooperate | last round was CC)
++ `p2` = P(cooperate | last round was CD) — I cooperated, opponent defected
++ `p3` = P(cooperate | last round was DC) — I defected, opponent cooperated
++ `p4` = P(cooperate | last round was DD)
+
+So a memory-1 strategy is just a point in `[0,1]^4`. Tit for Tat is `(1, 0, 1, 0)`. AllC is `(1, 1, 1, 1)`. AllD is `(0, 0, 0, 0)`. Pavlov is `(1, 0, 0, 1)`. Once the strategy is fixed, the long-run play with any other memory-1 strategy is a Markov chain whose stationary distribution gives the expected payoffs.
+
+The trick Press and Dyson found is that, by choosing `(p1, p2, p3, p4)` carefully, one player can force the **determinant** of a particular 4×4 matrix to vanish — and that determinant identity turns into a *linear constraint* on the two players' expected payoffs. Their (and your opponent's) score is forced onto a line, regardless of what the opponent does. These are called **Zero-Determinant (ZD) strategies**.
+
+The most provocative subset are **extortionate ZD strategies**: pick a parameter `χ > 1` (the "extortion factor") and you can guarantee `(my_score - P) = χ × (opp_score - P)`, where `P = 1` is the mutual-defection payoff. Translation: my surplus over P is always χ times the opponent's surplus over P. The opponent's *only* way to maximize their own score is to maximize mine — so a "rational" opponent ends up cooperating, and I extort them by a fixed ratio forever.
+
+A concrete example from the paper, with `(T,R,P,S) = (5,3,1,0)` and extortion factor `χ = 3`:
+
+```{r zd-strategy}
+# 提取因子 χ=3, 以 (T,R,P,S)=(5,3,1,0) 
+zd_extort_3 <- function(my_hist, opp_hist) {
+  if (length(my_hist) == 0) return("D")          # 第一步先背叛, 试探一下
+
+  last_my  <- my_hist[length(my_hist)]
+  last_opp <- opp_hist[length(opp_hist)]
+
+  p <- if      (last_my == "C" && last_opp == "C")   11 / 13
+       else if (last_my == "C" && last_opp == "D")    1 / 2
+       else if (last_my == "D" && last_opp == "C")    7 / 26
+       else                                           0
+
+  if (runif(1) < p) "C" else "D"
+}
+```
+
+### Test1
+ZD enforces `my_score - 1 = 3 × (opp_score - 1)`, not that it wins outright in absolute terms.
+
+```{r zd-vs-field, fig.width=10, fig.height=5}
+set.seed(42)
+
+zd_results <- names(strategies) |>
+  map_dfr(function(opp_name) {
+    map_dfr(1:5, function(rep) {
+      res <- play_match(zd_extort_3, strategies[[opp_name]],
+                        n_rounds = 500)        
+      tibble(opponent = opp_name, rep = rep,
+             zd_score  = mean(res$score_a),
+             opp_score = mean(res$score_b))
+    })
+  })
+
+zd_summary <- zd_results |>
+  group_by(opponent) |>
+  summarise(zd_score   = mean(zd_score),
+            opp_score  = mean(opp_score),
+            .groups    = "drop") |>
+  mutate(zd_surplus  = zd_score  - 1,    # 相对于 P=1 
+         opp_surplus = opp_score - 1,
+         ratio       = zd_surplus / pmax(opp_surplus, 0.01))
+
+print(zd_summary |>
+        mutate(across(c(zd_score, opp_score, ratio), \(x) round(x, 2))))
+```
+
+```{r zd-line, fig.width=8, fig.height=6}
+ggplot(zd_summary, aes(x = opp_surplus, y = zd_surplus, label = opponent)) +
+  geom_abline(slope = 3, intercept = 0, linetype = "dashed",
+              color = "#5066a1", linewidth = 0.8) +
+  annotate("text", x = 0.7, y = 2.4, hjust = 0,
+           label = "ZD-Extort line:\nzd_surplus = 3 × opp_surplus",
+           color = "#5066a1", size = 3.5) +
+  geom_point(size = 4, color = "#D35400") +
+  geom_text_repel(size = 3.8, box.padding = 0.5) +
+  labs(title    = "ZD-Extort-3 Forces Every Opponent Onto a Line",
+       x = "Opponent's surplus over P",
+       y = "ZD's surplus over P") +
+  theme_minimal(base_size = 11)
+```
+
+Every opponent — TFT, AllC, Pavlov almost on a line of slope 3. The line is enforced *unilaterally* by ZD's choice of `(p1, p2, p3, p4)`, and there's no strategy the opponent can pick to escape it (within the memory-1 family.and Press & Dyson prove that even higher-memory strategies can't do better than memory-1 against a fixed memory-1 opponent). The opponent's *only* lever is whether to cooperate (which makes everyone richer along the line) or defect (which drags both scores toward `(1, 1)`). But the *ratio* of their gains is locked.
+
+I hope my understanding is correct, but I feel there might still be some issues. However, I have a general idea of the argument in this article. OK, I think that covers some of it. Although there's lost of explaination part I do not include in this part. I think this solution might seem somewhat uninteresting from a mathematical standpoint, but the reason this topic is intriguing is that it generalizes many real-life scenarios. Yet real-life situations are far more complex than we might imagine. Perhaps people will continue working on them.......
