@@ -1,0 +1,269 @@
+---
+title: "Portfolio_Benfords_Law"
+author: "Holland Sun"
+output: github_document
+---
+## Portfolio Goals
+
++ Verify Benford's Law on a real public dataset
++ Run a formal chi-square test to confirm
++ Find a counterexample and figure out why
++ Then a quick look at Zipf's Law, which is basically the same idea applied to ranked data
+
+## Intro
+In 1881, Simon Newcomb noticed the early pages of his logarithm-table book were more worn than the later pages. People kept looking up logs of numbers starting with 1, 2, 3 way more than 7, 8, 9. He wrote a short note with the formula `P(d) = log10(1 + 1/d)` and then it was forgotten for almost 60 years until physicist Frank Benford rediscovered it in 1938. Benford got his name attached. <span style="color: deepskyblue;">**Interestly...This also seems to be another law called the Stigler's law of eponymy — the discovery is never named after the actual discoverer.**</span>
+
+The formula:
+
+$$P(\text{leading digit} = d) = \log_{10}\!\left(1 + \frac{1}{d}\right) \quad d \in \{1, ..., 9\}$$
+
+so substitute the numbers into the formula, it gives  30%, 18%, 12%, 10%, 8%, 7%, 6%, 5%, 5%. The cleanest intuition I've seen for this numbers/formula is this: **if your data is roughly uniformly distributed on a log axis, the leading digit follows Benford automatically**. The reason is that on a log scale the interval `[1, 2)` (numbers starting with 1) takes up width `log10(2) − log10(1) ≈ 0.301`, and `[2, 3)` takes up `log10(3) − log10(2) ≈ 0.176`, etc. The widths *are* the Benford probabilities.
+
+The way I think about this now is that what really matters is *how* the data is generated. A **multiplicative** process is one where each new value is the previous value times some random factor. Populations grow by `× (1 + birth_rate − death_rate)` each year, stock prices move by `× (1 + daily_return)`. If take the log of any such process, multiplication will become addition. After many steps the distribution of `log X`, it is roughly uniform across a wide range, it should be uniform in log distribution.
+
+
+a example is just sampling 10,000 (10^) numbers **uniformly** in log function, then check leading digits. Also use 42 as the seed in the sampling.
+
+<span style="color: deepskyblue;"> I don’t know if you remember this, but in one of the lab assignments, probably simulation lab, I intentionally emphasized the number 42. It’s because of a famous sci-fi novel, The Hitchhiker’s Guide to the Galaxy. In the story, there’s a supercomputer called Deep Thought that is asked to calculate “the answer to life, the universe, and everything.” It spends 7.5 million years calculating it, and finally gives the answer: 42.</span>
+
+<span style="color: deepskyblue;"> The ironic part is that nobody actually knows what the “ultimate question” is supposed to be.
+So, emmm, that was the joke.</span>
+
+```{r demo, fig.width=8, fig.height=4, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(scales)
+
+set.seed(42)
+log_sample <- 10 ^ runif(1e4, min = 0, max = 6)
+
+# Extract the leading digit
+fd <- as.integer(str_extract(format(log_sample, scientific = FALSE), "[1-9]"))
+tibble(digit = 1:9,
+       observed = as.numeric(table(factor(fd, levels = 1:9))) / length(fd),
+       expected = log10(1 + 1 / 1:9)) %>%
+  pivot_longer(c(observed, expected), names_to = "src", values_to = "p") %>%
+  ggplot(aes(x = factor(digit), y = p, fill = src)) +
+  geom_col(position = "dodge", width = 0.7) +
+  scale_fill_manual(values = c(observed = "#27AE60", expected = "#5066a1"),
+                    labels = c("Observed", "Benford")) +
+  scale_y_continuous(labels = percent_format(), expand = c(0, 0)) +
+  labs(x = "Leading digit", y = "Frequency", fill = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
+The two bars line up almost exactly. So whenever real-world data is "spread out evenly on a log axis" — populations, prices, river lengths — Benford pops out on its own. <span style="color: deepskyblue;">*Hill's 1995 theorem makes this even stronger: he proved that if a distribution is "scale-invariant" (multiplying all numbers by a constant doesn't change the leading-digit distribution), then it must be Benford. So under that assumption it's not just one of many reasonable answers — it's the only one.*</span>
+
+
+## Part 1 Verification
+
+Country populations are the classic "Benford candidate". they span seven orders of magnitude (from a few hundred thousand like tiny island states to over a billion like China), and demographic processes are multiplicative by nature.
+
+For real, current data I'll pull from the **World Bank Open Data API**, specifically the indicator `SP.POP.TOTL` ("Population, total"). I also use the same SerpApi tool in the Amazon portfolio.
+
+```{r wb-fetch, message=FALSE, warning=FALSE}
+library(httr2)
+REFRESH_DATA <- FALSE
+WB_CACHE     <- "data/wb_population.rds"
+
+fetch_wb_countries <- function() {
+  # /v2/country returns metadata for every entity WB tracks .
+
+  resp <- request("https://api.worldbank.org/v2/country") %>%
+    req_url_query(format = "json", per_page = 400) %>%
+    req_perform() %>%
+    resp_body_json()
+  # We ask for JSON and bump per_page to 400 so everything comes back in
+  
+  
+  # WB API JSON 
+  #   resp[[1]] is the pagination metadata (page, total, per_page, ...)
+  #   resp[[2]] is the actual records
+  map_dfr(resp[[2]], function(c) {
+    tibble(iso3   = c$id,            
+           name   = c$name,          # name
+           region = c$region$value)  # for filtering — real countries have a real region, aggregates have "Aggregates"
+  }) %>%
+    filter(region != "Aggregates")   # drop World / EU / OECD / income groupings
+}
+
+
+# get values for one WB indicator across all entities,
+fetch_wb_indicator <- function(indicator = "SP.POP.TOTL", year = 2022) { resp <- request(paste0("https://api.worldbank.org/v2/country/all/indicator/",
+                         indicator)) %>%
+    req_url_query(date = as.character(year),
+                  format = "json", per_page = 400) %>%
+    req_perform() %>%
+    resp_body_json()
+  # Same 2-element shape 
+  map_dfr(resp[[2]], function(r) {tibble(iso3       = r$countryiso3code,
+           year       = r$date,
+           population = r$value %||% NA_real_)})}
+
+
+if (REFRESH_DATA || !file.exists(WB_CACHE)) {
+  dir.create("data", showWarnings = FALSE)
+  countries <- fetch_wb_countries()                    # ~217 real countries
+  pop_raw   <- fetch_wb_indicator("SP.POP.TOTL", 2022) # population for 2022
+  country_pop <- pop_raw %>%
+    inner_join(countries, by = "iso3") %>%              # this drops the aggregates
+    filter(!is.na(population), population > 0) %>%      # and any countries with no value
+    select(iso3, country = name, region, population)
+  saveRDS(country_pop, WB_CACHE)
+} else {
+  country_pop <- readRDS(WB_CACHE)
+}
+```
+
+In the first, I just used the data as soon as I get hem. After reviewing it,I found that some country names were aggregated name like EU. Although I think the results should not be significantly affected.... I asked the Claude to help correct this and improve the relevant code. helpe me fix some issues like incomplete page scraping and addressed problems with data storage,previously, I wasn’t sure why the data was being saved to the environment.
+
+Ok,let's plot the distribution
+```{r plot, fig.width=8, fig.height=4.5, message=FALSE, warning=FALSE}
+# Extract the leading digit
+pop_digits <- as.integer(str_extract(format(country_pop$population,
+                                            scientific = FALSE), "[1-9]"))
+# comparison table
+pop_summary <- tibble(
+  digit    = 1:9,
+  observed = as.numeric(table(factor(pop_digits, levels = 1:9))) / length(pop_digits),
+  expected = log10(1 + 1 / 1:9)        # Benford prediction
+)
+
+pop_summary %>%
+  pivot_longer(c(observed, expected), names_to = "src", values_to = "p") %>%
+  ggplot(aes(x = factor(digit), y = p, fill = src)) +
+  geom_col(position = "dodge", width = 0.75) +
+  scale_fill_manual(values = c(observed = "#27AE60", expected = "#5066a1"),
+                    labels = c("Observed", "Benford")) +
+  scale_y_continuous(labels = percent_format(), expand = c(0, 0)) +
+  labs(title    = paste0("Leading-Digit Distribution: ",
+                         nrow(country_pop), " Country Populations"),
+       x = "Leading digit", y = "Frequency", fill = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "bottom")
+```
+
+Looks really close to Benford. But eyeballing it isn't enough though, let's do a formal test.
+
+## Part 2 Chi-Square Test
+
+The standard way to ask "does this distribution match Benford" is the chi-square goodness-of-fit test. It compares observed vs expected counts and returns a p-value....
+
+```{r pop-chisq, message=FALSE, warning=FALSE}
+pop_digits     <- as.integer(str_extract(format(country_pop$population,
+                                                scientific = FALSE), "[1-9]"))
+pop_obs_counts <- as.numeric(table(factor(pop_digits, levels = 1:9)))
+pop_chisq <- chisq.test(pop_obs_counts, p = log10(1 + 1 / 1:9))
+pop_chisq
+```
+
+the reuslt p = `r round(pop_chisq$p.value, 2)`, which is way above 0.05, so the country-population data is statistically consistent with Benford.
+
+## Part 3 Counterexample 
+
+The country populations passed nicely. 
+
+A more interesting question is: when does Benford NOT hold? Going back to the multiplicative-process intuition, the law really needs two mathematical conditions :
+1. **The data has to span several orders of magnitude.** If it doesn't, there isn't enough "log-space" for the `[1,2), [2,3), ..., [9,10)` intervals to actually fill out. 
+
+2. **The values also need to be fairly evenly spread on a log scale.** If the numbers mostly bunch up in a few specific ranges, Benford law starts to fail. Those ranges will make some leading digits appear way too often for example.
+
+A nice counterexample illustration here is R's built-in `quakes` dataset, 1,000 earthquakes near Fiji with depths in km. 
+
+```{r quakes, fig.width=11, fig.height=4.5, message=FALSE, warning=FALSE}
+data(quakes)
+
+# Same first-digit recipe as before
+qk_digits <- as.integer(str_extract(format(quakes$depth,
+                                           scientific = FALSE), "[1-9]"))
+quakes_summary <- tibble(
+  digit    = 1:9,
+  observed = as.numeric(table(factor(qk_digits, levels = 1:9))) / length(qk_digits),
+  expected = log10(1 + 1 / 1:9)
+)
+
+
+
+# leading-digit distribution vs Benford
+pk <- quakes_summary %>%
+  pivot_longer(c(observed, expected), names_to = "src", values_to = "p") %>%
+  ggplot(aes(x = factor(digit), y = p, fill = src)) +
+  geom_col(position = "dodge", width = 0.75) +
+  scale_fill_manual(values = c(observed = "#E74C3C", expected = "#5066a1"),
+                    labels = c("Observed", "Benford")) +
+  scale_y_continuous(labels = percent_format(), expand = c(0, 0)) +
+  labs(title = "Leading-digit distribution",
+       x = "Leading digit", y = "Frequency", fill = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "bottom")
+pk
+```
+
+```{r qchisq, message=FALSE, warning=FALSE}
+q_digits     <- as.integer(str_extract(format(quakes$depth,
+                                               scientific = FALSE), "[1-9]"))
+q_obs_counts <- as.numeric(table(factor(q_digits, levels = 1:9)))
+q_chisq <- chisq.test(q_obs_counts, p = log10(1 + 1 / 1:9))
+q_chisq
+
+```
+
+The leading digit peaks at **5**, not 1, and the test gives p = `r round(q_chisq$p.value, 2)`. which is significant meaning that it's off from Benford.
+
+
+The reason may be because of these values are not evenly spreading on a log scale. Let's see the distribution of them.
+
+```{r qd, message=FALSE, warning=FALSE}
+pd <- ggplot(quakes, aes(x = depth)) +
+  geom_histogram(bins = 30, fill = "#7FB3D3", color = "white") +
+  labs(title = "Earthquake depths (n=1000)", x = "Depth (km)", y = "Count") +
+  theme_minimal(base_size = 10)
+pd
+```
+
+it's kind of  **Bimodal clustering** — the histogram has two bumps, one ~50–100  and one ~500–650  Almost nothing in between, so digits 5 and 6 are way over-represented.And also the range too narrow on a log scale, which spread among 40 to 680 km.
+
+## Part 5 Zipf's Law
+
+The natural cousin to Benford is **Zipf's Law**: in any natural-language text, the *k*-th most common word shows up with frequency roughly proportional to `1/k`. On log-log axes that's a straight line of slope **−1**. I discovered that R also has text datasets when reviewing the earthquake dataset, so it's a good opportunity to explore this.
+
+But I'm still not quite sure how to handle text content. So basically I've referred to many many many suggestions of Claude, such as normalization,string concatenation and case conversion issuesand so on.(So maybe in the future we may have a text content analysis chapter in this class?)
+
+```{r zipf, fig.width=8, fig.height=5, message=FALSE, warning=FALSE}
+library(janeaustenr)
+
+#
+tokens <- austen_books()$text %>%
+  paste(collapse = " ") %>%
+  tolower() %>%
+  str_replace_all("[^a-z\\s']", " ") %>%
+  str_split("\\s+") %>%
+  unlist() %>%
+  keep(\(w) nchar(w) > 0)
+
+# Count, rank, fit the power-law slope on the bulk of the distribution
+word_freq <- tibble(word = tokens) %>%
+  count(word, sort = TRUE) %>%
+  mutate(rank = row_number())
+
+zipf_fit <- lm(log10(n) ~ log10(rank),
+               data = word_freq %>% filter(rank >= 10, rank <= 5000))
+
+ggplot(word_freq, aes(x = rank, y = n)) +
+  geom_point(alpha = 0.4, color = "#5066a1", size = 0.7) +
+  geom_abline(intercept = coef(zipf_fit)[1], slope = coef(zipf_fit)[2],
+              color = "#D35400", linewidth = 0.8, linetype = "dashed") +
+  scale_x_log10(labels = comma) + scale_y_log10(labels = comma) +
+  labs(x = "Word rank", y = "Word count") +
+  theme_minimal(base_size = 11)
+```
+
+Slope = `r round(coef(zipf_fit)[2], 3)` it's close to the the 1. Cool
+
+Zipf’s Law describes a kind of power-law pattern. The basic idea is that a small number of things are extremely common or very large, but most things are rare or small. Because of that, the values often stretch across several orders of magnitude. When the numbers are spread out like that on a log scale, their leading digits can start to look like Benford law. 
+
+So the broader point is that a lot of real world data is not evenly distributed in the usual sense. It often has a strong scale structure.
+
+## Summary for all Portfolio
+
+I intended to write the summary here, but I've decided to send an email instead!
